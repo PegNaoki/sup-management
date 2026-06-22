@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>アラームアプリ</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ストップウォッチ</title>
   <style>
     * {
       margin: 0;
@@ -12,339 +12,212 @@
     }
 
     body {
-      font-family: 'Segoe UI', sans-serif;
-      background: #0f0f1a;
-      color: #fff;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
       min-height: 100vh;
-      padding: 40px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0f0f0f;
+      font-family: 'Courier New', monospace;
+    }
+
+    .container {
+      text-align: center;
     }
 
     h1 {
-      font-size: 1.4rem;
-      font-weight: 400;
-      letter-spacing: 0.2em;
-      color: #aaa;
-      margin-bottom: 40px;
+      color: #888;
+      font-size: 1rem;
+      letter-spacing: 0.3em;
       text-transform: uppercase;
+      margin-bottom: 2rem;
     }
 
-    .clock {
-      font-size: 5rem;
-      font-weight: 200;
+    .display {
+      font-size: clamp(3rem, 12vw, 7rem);
+      font-weight: 700;
+      color: #f0f0f0;
       letter-spacing: 0.05em;
-      color: #fff;
-      margin-bottom: 60px;
+      margin-bottom: 2.5rem;
       font-variant-numeric: tabular-nums;
     }
 
-    .set-alarm {
-      background: #1a1a2e;
-      border: 1px solid #2a2a4a;
-      border-radius: 16px;
-      padding: 28px 32px;
-      width: 100%;
-      max-width: 360px;
-      margin-bottom: 40px;
+    .display .ms {
+      font-size: 0.5em;
+      color: #aaa;
     }
 
-    .set-alarm label {
-      display: block;
-      font-size: 0.75rem;
-      letter-spacing: 0.15em;
-      color: #888;
-      text-transform: uppercase;
-      margin-bottom: 12px;
-    }
-
-    .time-input-row {
+    .buttons {
       display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 16px;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
     }
 
-    .time-input-row input[type="time"] {
-      flex: 1;
-      background: #0f0f1a;
-      border: 1px solid #2a2a4a;
-      border-radius: 10px;
-      color: #fff;
-      font-size: 1.6rem;
-      font-weight: 200;
-      padding: 14px 18px;
-      outline: none;
-      width: 100%;
-      color-scheme: dark;
-    }
-
-    .time-input-row input[type="time"]:focus {
-      border-color: #6c63ff;
-    }
-
-    .add-btn {
-      width: 100%;
-      background: #6c63ff;
+    button {
+      padding: 0.8rem 2rem;
+      font-size: 1rem;
+      font-family: inherit;
       border: none;
-      border-radius: 10px;
-      color: #fff;
-      font-size: 0.9rem;
-      letter-spacing: 0.1em;
-      padding: 14px;
+      border-radius: 50px;
       cursor: pointer;
-      transition: background 0.2s;
+      letter-spacing: 0.1em;
+      transition: transform 0.1s, opacity 0.2s;
     }
 
-    .add-btn:hover {
-      background: #574fd6;
+    button:active {
+      transform: scale(0.96);
     }
 
-    .alarm-list {
-      width: 100%;
-      max-width: 360px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
+    #btn-start {
+      background: #22c55e;
+      color: #000;
+      font-weight: 700;
     }
 
-    .alarm-list h2 {
-      font-size: 0.75rem;
-      letter-spacing: 0.15em;
-      color: #888;
-      text-transform: uppercase;
-      margin-bottom: 4px;
+    #btn-stop {
+      background: #ef4444;
+      color: #fff;
+      font-weight: 700;
     }
 
-    .alarm-item {
-      background: #1a1a2e;
-      border: 1px solid #2a2a4a;
-      border-radius: 14px;
-      padding: 18px 20px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      transition: border-color 0.2s;
-    }
-
-    .alarm-item.ringing {
-      border-color: #6c63ff;
-      animation: pulse 0.8s infinite alternate;
-    }
-
-    @keyframes pulse {
-      from { background: #1a1a2e; }
-      to   { background: #1e1a40; }
-    }
-
-    .alarm-time {
-      font-size: 1.8rem;
-      font-weight: 200;
-      letter-spacing: 0.05em;
-    }
-
-    .alarm-controls {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-    }
-
-    .toggle {
-      width: 44px;
-      height: 24px;
+    #btn-reset {
       background: #333;
-      border-radius: 12px;
-      position: relative;
-      cursor: pointer;
-      transition: background 0.2s;
-      border: none;
+      color: #aaa;
     }
 
-    .toggle.on {
-      background: #6c63ff;
-    }
-
-    .toggle::after {
-      content: '';
-      position: absolute;
-      width: 18px;
-      height: 18px;
-      background: #fff;
-      border-radius: 50%;
-      top: 3px;
-      left: 3px;
-      transition: left 0.2s;
-    }
-
-    .toggle.on::after {
-      left: 23px;
-    }
-
-    .delete-btn {
-      background: none;
-      border: none;
-      color: #555;
-      font-size: 1.1rem;
-      cursor: pointer;
-      padding: 4px;
-      transition: color 0.2s;
-      line-height: 1;
-    }
-
-    .delete-btn:hover {
-      color: #e05c5c;
-    }
-
-    .stop-btn {
-      width: 100%;
-      background: #e05c5c;
-      border: none;
-      border-radius: 10px;
+    #btn-lap {
+      background: #3b82f6;
       color: #fff;
+      font-weight: 700;
+    }
+
+    button:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    .laps {
+      margin-top: 2rem;
+      max-height: 240px;
+      overflow-y: auto;
+      width: 320px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .laps::-webkit-scrollbar {
+      width: 4px;
+    }
+    .laps::-webkit-scrollbar-track { background: transparent; }
+    .laps::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+    .lap-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.4rem 0.8rem;
+      color: #888;
       font-size: 0.9rem;
-      letter-spacing: 0.1em;
-      padding: 14px;
-      cursor: pointer;
-      margin-top: 14px;
-      transition: background 0.2s;
+      border-bottom: 1px solid #1a1a1a;
     }
 
-    .stop-btn:hover {
-      background: #c04545;
+    .lap-item span:first-child {
+      color: #555;
     }
 
-    .empty {
-      color: #444;
-      font-size: 0.85rem;
-      text-align: center;
-      padding: 20px 0;
+    .lap-item span:last-child {
+      color: #ccc;
+      font-variant-numeric: tabular-nums;
     }
   </style>
 </head>
 <body>
-
-  <h1>Alarm</h1>
-  <div class="clock" id="clock">00:00:00</div>
-
-  <div class="set-alarm">
-    <label>新しいアラーム</label>
-    <div class="time-input-row">
-      <input type="time" id="timeInput" />
+  <div class="container">
+    <h1>Stopwatch</h1>
+    <div class="display">
+      <span id="time">00:00</span><span class="ms">.<span id="ms">00</span></span>
     </div>
-    <button class="add-btn" onclick="addAlarm()">追加</button>
+    <div class="buttons">
+      <button id="btn-start">START</button>
+      <button id="btn-stop" disabled>STOP</button>
+      <button id="btn-lap" disabled>LAP</button>
+      <button id="btn-reset">RESET</button>
+    </div>
+    <div class="laps" id="laps"></div>
   </div>
-
-  <div class="alarm-list">
-    <h2>設定済み</h2>
-    <div id="alarmItems"><p class="empty">アラームがありません</p></div>
-  </div>
-
-  <audio id="beep" preload="auto"></audio>
 
   <script>
-    let alarms = JSON.parse(localStorage.getItem('alarms') || '[]');
-    let ringingId = null;
-    let audioCtx = null;
-    let beepInterval = null;
+    let startTime = 0;
+    let elapsed = 0;
+    let rafId = null;
+    let lapCount = 0;
+    let lapStart = 0;
 
-    function getAudioCtx() {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      return audioCtx;
+    const timeEl = document.getElementById('time');
+    const msEl = document.getElementById('ms');
+    const lapsEl = document.getElementById('laps');
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    const btnReset = document.getElementById('btn-reset');
+    const btnLap = document.getElementById('btn-lap');
+
+    function format(ms) {
+      const totalSec = Math.floor(ms / 1000);
+      const min = Math.floor(totalSec / 60).toString().padStart(2, '0');
+      const sec = (totalSec % 60).toString().padStart(2, '0');
+      const cs = Math.floor((ms % 1000) / 10).toString().padStart(2, '0');
+      return { main: `${min}:${sec}`, cs };
     }
 
-    function playBeep() {
-      const ctx = getAudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      gain.gain.setValueAtTime(0.4, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.4);
+    function tick() {
+      elapsed = Date.now() - startTime;
+      const { main, cs } = format(elapsed);
+      timeEl.textContent = main;
+      msEl.textContent = cs;
+      rafId = requestAnimationFrame(tick);
     }
 
-    function startRinging(id) {
-      ringingId = id;
-      playBeep();
-      beepInterval = setInterval(playBeep, 600);
-      render();
-    }
+    btnStart.addEventListener('click', () => {
+      startTime = Date.now() - elapsed;
+      if (!lapStart) lapStart = startTime;
+      rafId = requestAnimationFrame(tick);
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      btnLap.disabled = false;
+    });
 
-    function stopRinging() {
-      clearInterval(beepInterval);
-      beepInterval = null;
-      ringingId = null;
-      render();
-    }
+    btnStop.addEventListener('click', () => {
+      cancelAnimationFrame(rafId);
+      btnStop.disabled = true;
+      btnLap.disabled = true;
+      btnStart.disabled = false;
+      btnStart.textContent = 'RESUME';
+    });
 
-    function tickClock() {
-      const now = new Date();
-      const hh = String(now.getHours()).padStart(2, '0');
-      const mm = String(now.getMinutes()).padStart(2, '0');
-      const ss = String(now.getSeconds()).padStart(2, '0');
-      document.getElementById('clock').textContent = `${hh}:${mm}:${ss}`;
+    btnReset.addEventListener('click', () => {
+      cancelAnimationFrame(rafId);
+      elapsed = 0;
+      lapCount = 0;
+      lapStart = 0;
+      timeEl.textContent = '00:00';
+      msEl.textContent = '00';
+      lapsEl.innerHTML = '';
+      btnStart.disabled = false;
+      btnStart.textContent = 'START';
+      btnStop.disabled = true;
+      btnLap.disabled = true;
+    });
 
-      const current = `${hh}:${mm}`;
-      if (ss === '00') {
-        alarms.forEach(a => {
-          if (a.enabled && a.time === current && ringingId !== a.id) {
-            startRinging(a.id);
-          }
-        });
-      }
-    }
-
-    function addAlarm() {
-      const val = document.getElementById('timeInput').value;
-      if (!val) return;
-      const alarm = { id: Date.now(), time: val, enabled: true };
-      alarms.push(alarm);
-      save();
-      render();
-    }
-
-    function toggleAlarm(id) {
-      alarms = alarms.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a);
-      save();
-      render();
-    }
-
-    function deleteAlarm(id) {
-      if (ringingId === id) stopRinging();
-      alarms = alarms.filter(a => a.id !== id);
-      save();
-      render();
-    }
-
-    function save() {
-      localStorage.setItem('alarms', JSON.stringify(alarms));
-    }
-
-    function render() {
-      const container = document.getElementById('alarmItems');
-      if (alarms.length === 0) {
-        container.innerHTML = '<p class="empty">アラームがありません</p>';
-        return;
-      }
-      container.innerHTML = alarms.map(a => `
-        <div class="alarm-item ${ringingId === a.id ? 'ringing' : ''}">
-          <span class="alarm-time">${a.time}</span>
-          <div class="alarm-controls">
-            <button class="toggle ${a.enabled ? 'on' : ''}" onclick="toggleAlarm(${a.id})"></button>
-            <button class="delete-btn" onclick="deleteAlarm(${a.id})">✕</button>
-          </div>
-        </div>
-        ${ringingId === a.id ? `<button class="stop-btn" onclick="stopRinging()">アラームを止める</button>` : ''}
-      `).join('');
-    }
-
-    render();
-    setInterval(tickClock, 1000);
-    tickClock();
+    btnLap.addEventListener('click', () => {
+      lapCount++;
+      const now = Date.now();
+      const lapTime = now - lapStart;
+      lapStart = now;
+      const { main, cs } = format(lapTime);
+      const item = document.createElement('div');
+      item.className = 'lap-item';
+      item.innerHTML = `<span>Lap ${lapCount}</span><span>${main}.${cs}</span>`;
+      lapsEl.prepend(item);
+    });
   </script>
 </body>
 </html>
