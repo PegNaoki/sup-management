@@ -9,7 +9,6 @@ const CONFIG = {
   EVENT_DURATION_HOURS: 2,
   PROCESSED_LABEL:    'SUP予約/処理済',
 
-  // 差出人アドレス＋SUPキーワードで絞り込み（Gmail側で件数を減らしタイムアウト防止）
   SEARCH_QUERY: 'in:anywhere (SUP OR サップ) ('
     + 'from:reservation@activityboard.jp'
     + ' OR from:reservation_request@activityboard.jp'
@@ -18,11 +17,9 @@ const CONFIG = {
     + ')',
 };
 
-// 予約タイプ判定キーワード
 const CONFIRMED_KEYWORDS = ['予約確定', '即時確定', '決済完了', '予約が確定'];
 const TENTATIVE_KEYWORDS = ['仮予約', '予約のリクエスト'];
 
-// スプレッドシートの列定義
 const COLUMNS = {
   TIMESTAMP:       1,  // A: 処理日時
   SUBJECT:         2,  // B: メール件名
@@ -30,41 +27,38 @@ const COLUMNS = {
   BOOKING_TYPE:    4,  // D: 予約タイプ
   BOOKING_NO:      5,  // E: 予約番号
   NAME:            6,  // F: 予約者名
-  DATE:            7,  // G: 予約日
-  TIME:            8,  // H: 予約時間
-  PEOPLE:          9,  // I: 人数
-  EMAIL:           10, // J: メールアドレス
-  PHONE:           11, // K: 電話番号
-  NOTES:           12, // L: 備考
-  STATUS:          13, // M: ステータス
-  CALENDAR_ID_COL: 14, // N: カレンダーイベントID
-  MESSAGE_ID:      15, // O: メッセージID（重複防止）
+  KANA:            7,  // G: フリガナ
+  DATE:            8,  // H: 予約日
+  TIME:            9,  // I: 予約時間
+  PEOPLE:          10, // J: 人数（合計）
+  PEOPLE_DETAIL:   11, // K: 人数内訳
+  AMOUNT:          12, // L: 金額
+  PAYMENT:         13, // M: 支払方法
+  EMAIL:           14, // N: メールアドレス
+  PHONE:           15, // O: 電話番号
+  NOTES:           16, // P: 備考
+  STATUS:          17, // Q: ステータス
+  CALENDAR_ID_COL: 18, // R: カレンダーイベントID
+  MESSAGE_ID:      19, // S: メッセージID（重複防止）
 };
 
 // ============================================================
-// メイン処理：メール取込（通常トリガー用・直近50件）
+// メイン処理：メール取込（トリガー用・直近50件）
 // ============================================================
 function importReservationEmails() {
   importEmails_(50);
 }
 
-// ============================================================
-// 過去メール全件一括取込（手動実行用・最大500件）
-// ============================================================
+// 過去メール全件一括取込（手動実行用）
 function importAllHistoricalEmails() {
-  PropertiesService.getScriptProperties().deleteProperty('IMPORT_OFFSET');
   importEmails_(500);
 }
 
-// ============================================================
-// 共通取込処理
-// ============================================================
 function importEmails_(limit) {
-  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  const sheet = getOrCreateSheet(ss);
-  const label = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
-
-  const threads  = GmailApp.search(CONFIG.SEARCH_QUERY, 0, limit);
+  const ss      = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet   = getOrCreateSheet(ss);
+  const label   = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
+  const threads = GmailApp.search(CONFIG.SEARCH_QUERY, 0, limit);
   const existing = loadExistingReservations(sheet);
 
   let newCount = 0, updateCount = 0;
@@ -74,17 +68,15 @@ function importEmails_(limit) {
       const msgId = message.getId();
       if (existing.byMsgId.has(msgId)) return;
 
-      const reservation = parseEmail(message);
-      if (!reservation) return;
+      const r = parseEmail(message);
+      if (!r) return;
 
-      const bookingNo   = reservation.bookingNo;
-      const existingRow = bookingNo ? existing.byBookingNo.get(bookingNo) : null;
-
+      const existingRow = r.bookingNo ? existing.byBookingNo.get(r.bookingNo) : null;
       if (existingRow) {
-        updateRow(sheet, existingRow, reservation, msgId, message.getSubject());
+        updateRow(sheet, existingRow, r, msgId, message.getSubject());
         updateCount++;
       } else {
-        appendToSheet(sheet, reservation, msgId, message.getSubject());
+        appendToSheet(sheet, r, msgId, message.getSubject());
         newCount++;
       }
     });
@@ -92,11 +84,11 @@ function importEmails_(limit) {
   });
 
   if (newCount > 0 || updateCount > 0) SpreadsheetApp.flush();
-  Logger.log(`取込完了：新規${newCount}件・更新${updateCount}件（対象スレッド${threads.length}件）`);
+  Logger.log(`取込完了：新規${newCount}件・更新${updateCount}件（対象${threads.length}スレッド）`);
 }
 
 // ============================================================
-// メイン処理：カレンダー登録
+// カレンダー登録
 // ============================================================
 function registerApprovedToCalendar() {
   const ss       = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
@@ -115,15 +107,20 @@ function registerApprovedToCalendar() {
     const row        = data[i];
     const status     = row[COLUMNS.STATUS - 1];
     const calEventId = row[COLUMNS.CALENDAR_ID_COL - 1];
-
     if (status !== '承認済' || calEventId) continue;
 
-    const name    = row[COLUMNS.NAME - 1];
-    const people  = row[COLUMNS.PEOPLE - 1];
-    const site    = row[COLUMNS.BOOKING_SITE - 1];
-    const notes   = row[COLUMNS.NOTES - 1];
-    const dateStr = row[COLUMNS.DATE - 1];
-    const timeStr = row[COLUMNS.TIME - 1];
+    const site         = row[COLUMNS.BOOKING_SITE - 1];
+    const name         = row[COLUMNS.NAME - 1];
+    const kana         = row[COLUMNS.KANA - 1];
+    const dateStr      = row[COLUMNS.DATE - 1];
+    const timeStr      = row[COLUMNS.TIME - 1];
+    const people       = row[COLUMNS.PEOPLE - 1];
+    const peopleDetail = row[COLUMNS.PEOPLE_DETAIL - 1];
+    const amount       = row[COLUMNS.AMOUNT - 1];
+    const payment      = row[COLUMNS.PAYMENT - 1];
+    const email        = row[COLUMNS.EMAIL - 1];
+    const phone        = row[COLUMNS.PHONE - 1];
+    const notes        = row[COLUMNS.NOTES - 1];
 
     const startDate = parseDateTime(dateStr, timeStr);
     if (!startDate) {
@@ -131,10 +128,28 @@ function registerApprovedToCalendar() {
       continue;
     }
 
-    const endDate     = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
-    const title       = `【SUP予約】${name} ${people}名 (${site})`;
-    const description = [`予約者: ${name}`, `人数: ${people}名`, `予約サイト: ${site}`, notes ? `備考: ${notes}` : '']
-                          .filter(Boolean).join('\n');
+    const endDate = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
+
+    // タイトル例：【じゃらんnet】ナカヤマ カナコ｜2名｜7,000円｜カード決済
+    const displayName   = kana || name;
+    const peopleStr     = peopleDetail || `${people}名`;
+    const amountStr     = amount ? `${amount}` : '';
+    const paymentStr    = payment || '';
+    const titleParts    = [`【${site}】${displayName}`, peopleStr, amountStr, paymentStr]
+                            .filter(Boolean);
+    const title = titleParts.join('｜');
+
+    // 説明文
+    const description = [
+      `予約者: ${name}`,
+      kana         ? `フリガナ: ${kana}`           : '',
+      phone        ? `電話番号: ${phone}`           : '',
+      email        ? `メール: ${email}`             : '',
+      peopleDetail ? `人数内訳: ${peopleDetail}`    : `人数: ${people}名`,
+      amount       ? `金額: ${amount}`              : '',
+      payment      ? `支払方法: ${payment}`         : '',
+      notes        ? `備考: ${notes}`               : '',
+    ].filter(Boolean).join('\n');
 
     try {
       const event = calendar.createEvent(title, startDate, endDate, { description });
@@ -153,116 +168,130 @@ function registerApprovedToCalendar() {
 }
 
 // ============================================================
-// SUP判定：本文にSUPが含まれるか
-// ============================================================
-function isSUP(reservation, body) {
-  return body.includes('SUP') || body.includes('サップ') || body.includes('サップ体験');
-}
-
-// ============================================================
-// メール解析ディスパッチャー
+// メール解析
 // ============================================================
 function parseEmail(message) {
   const from = message.getFrom();
   const body = message.getPlainBody();
   const subject = message.getSubject();
 
-  if (from.includes('activityboard.jp'))          return parseJalan(subject, body);
-  if (from.includes('mailsender@asoview'))         return parseAsoview(subject, body);
+  if (from.includes('activityboard.jp'))              return parseJalan(subject, body);
+  if (from.includes('mailsender@asoview'))            return parseAsoview(subject, body);
   if (from.includes('reserve-system@activityjapan')) return parseActivityJapan(subject, body);
-
   return null;
 }
 
 // ============================================================
-// じゃらんnet（reservation@activityboard.jp）
-// 本文例:
-//   予約番号：30A1UP0VW
-//   利用日時：2026/07/18(土) 09:30～11:30
-//   人数：2名
-//   体験者氏名：中山 加奈子(ナカヤマ　カナコ)様
-//   メールアドレス：paniko_home@yahoo.co.jp
-//   電話番号：08039716102
+// じゃらんnet
+// 体験者氏名：中山 加奈子(ナカヤマ　カナコ)様
+// 利用日時：2026/07/18(土) 09:30～11:30
+// 人数：2名
+// 合計料金(税込)：7,000円
+// 支払方法：オンラインカード決済
 // ============================================================
 function parseJalan(subject, body) {
-  const dtMatch = body.match(/利用日時[：:]\s*(\d{4})\/(\d{1,2})\/(\d{1,2})[^0-9]*(\d{1,2}:\d{2})/);
+  const dtMatch   = body.match(/利用日時[：:]\s*(\d{4})\/(\d{1,2})\/(\d{1,2})[^0-9]*(\d{1,2}:\d{2})/);
+  const nameMatch = body.match(/体験者氏名[：:]\s*(.+?)(?:（|\()([^）)]+)(?:）|\))\s*様/);
+
+  // 人数内訳（例：大人×2名、子供×1名）
+  const peopleRows   = [...body.matchAll(/([^：\n]+)[：:]\s*(\d+)\s*名/g)]
+                         .filter(m => ['大人', '小人', '子供', 'お一人'].some(k => m[1].includes(k)));
+  const peopleDetail = peopleRows.length
+    ? peopleRows.map(m => `${m[1].trim()}${m[2]}名`).join('・')
+    : '';
 
   return {
-    site:      'じゃらんnet',
-    bookingNo: extract(body, [/予約番号[：:]\s*([A-Z0-9]+)/]),
-    name:      extract(body, [/体験者氏名[：:]\s*(.+?)(?:様|\()/]),
-    date:      dtMatch ? `${dtMatch[1]}/${dtMatch[2]}/${dtMatch[3]}` : extract(body, [/(\d{4}\/\d{1,2}\/\d{1,2})/]),
-    time:      dtMatch ? dtMatch[4] : extract(body, [/(\d{1,2}:\d{2})/]),
-    people:    extract(body, [/人数[：:]\s*(\d+)\s*名/]),
-    email:     extract(body, [/メールアドレス[：:]\s*([\w.\-]+@[\w.\-]+)/]),
-    phone:     extract(body, [/電話番号[：:]\s*([\d\-\+]+)/]),
-    notes:     extract(body, [/備考[：:]\s*(.+)/]),
+    site:         'じゃらんnet',
+    bookingNo:    extract(body, [/予約番号[：:]\s*([A-Z0-9]+)/]),
+    name:         nameMatch ? nameMatch[1].trim() : extract(body, [/体験者氏名[：:]\s*(.+?)(?:様|\()/]),
+    kana:         nameMatch ? nameMatch[2].trim() : '',
+    date:         dtMatch ? `${dtMatch[1]}/${dtMatch[2]}/${dtMatch[3]}` : extract(body, [/(\d{4}\/\d{1,2}\/\d{1,2})/]),
+    time:         dtMatch ? dtMatch[4] : extract(body, [/(\d{1,2}:\d{2})/]),
+    people:       extract(body, [/人数[：:]\s*(\d+)\s*名/]),
+    peopleDetail: peopleDetail,
+    amount:       extract(body, [/合計料金[（(]税込[）)][：:]\s*([0-9,]+円)/]),
+    payment:      extract(body, [/支払方法[：:]\s*(.+)/]),
+    email:        extract(body, [/メールアドレス[：:]\s*([\w.\-]+@[\w.\-]+)/]),
+    phone:        extract(body, [/電話番号[：:]\s*([\d\-\+]+)/]),
+    notes:        extract(body, [/備考[：:]\s*(.+)/]),
   };
 }
 
 // ============================================================
-// アソビュー／satsuki（mailsender@asoview.com）
-// 本文例:
-//   予約代表者氏名 | 八角 亮 様
-//   電話番号 | 080-1832-8930
-//   ◆催行日 | 2026 年 07 月 15 日（水曜日）
-//   ◆コース | 10:00
-//   大人 13〜70歳 | 8500円 × 6名
+// アソビュー／satsuki
+// 予約代表者氏名 | 八角 亮 様
+// 予約代表者氏名カナ | ヤスミ リョウ サマ
+// ◆催行日 | 2026 年 07 月 15 日
+// ◆コース | 10:00
+// 大人 13〜70歳 | 8500円 × 6名
+// ◆提示金額 | 48000円（税込）
+// ◆支払い方法 | 現地払い
 // ============================================================
 function parseAsoview(subject, body) {
-  const dateMatch   = body.match(/◆催行日\s*\|\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
-  const dateStr     = dateMatch ? `${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]}` : '';
-  const peopleMatch = [...body.matchAll(/[×x]\s*(\d+)\s*名/g)];
-  const totalPeople = peopleMatch.reduce((sum, m) => sum + parseInt(m[1], 10), 0);
+  const dateMatch    = body.match(/◆催行日\s*\|\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+  const dateStr      = dateMatch ? `${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]}` : '';
 
-  // satsuki URLから予約番号を取得
-  const bookingNo = extract(body, [/reserveNo(\d+)/, /予約番号[：:]\s*(\d+)/]);
+  // 人数内訳と合計
+  const peopleLines  = [...body.matchAll(/^(.+?)\s*\|\s*\d+円\s*[×x]\s*(\d+)\s*名/gm)];
+  const totalPeople  = peopleLines.reduce((s, m) => s + parseInt(m[2], 10), 0);
+  const peopleDetail = peopleLines.length
+    ? peopleLines.map(m => `${m[1].trim()}×${m[2]}名`).join('・')
+    : '';
 
   return {
-    site:      'アソビュー/satsuki',
-    bookingNo: bookingNo,
-    name:      extract(body, [/予約代表者氏名\s*\|\s*(.+?)\s*様/]),
-    date:      dateStr,
-    time:      extract(body, [/◆コース\s*\|\s*(\d{1,2}:\d{2})/]),
-    people:    totalPeople || extract(body, [/(\d+)\s*名/]),
-    email:     extract(body, [/メールアドレス\s*\|\s*([\w.\-]+@[\w.\-]+)/]),
-    phone:     extract(body, [/電話番号\s*\|\s*([\d\-\+]+)/]),
-    notes:     extract(body, [/ご質問・ご要望等.*?[\r\n]+＜内容＞[\r\n]+([^\r\n]+)/s]),
+    site:         'アソビュー/satsuki',
+    bookingNo:    extract(body, [/reserveNo(\d+)/, /予約番号[：:]\s*(\d+)/]),
+    name:         extract(body, [/予約代表者氏名\s*\|\s*(.+?)\s*様/]),
+    kana:         extract(body, [/予約代表者氏名カナ\s*\|\s*(.+?)\s*サマ/]),
+    date:         dateStr,
+    time:         extract(body, [/◆コース\s*\|\s*(\d{1,2}:\d{2})/]),
+    people:       totalPeople || extract(body, [/(\d+)\s*名/]),
+    peopleDetail: peopleDetail,
+    amount:       extract(body, [/◆提示金額\s*\|\s*([0-9,]+円)/]),
+    payment:      extract(body, [/◆支払い方法\s*\|\s*(.+)/]),
+    email:        extract(body, [/メールアドレス\s*\|\s*([\w.\-]+@[\w.\-]+)/]),
+    phone:        extract(body, [/電話番号\s*\|\s*([\d\-\+]+)/]),
+    notes:        extract(body, [/ご質問・ご要望等.*?[\r\n]+＜内容＞[\r\n]+([^\r\n]+)/s]),
   };
 }
 
 // ============================================================
-// アクティビティジャパン（reserve-system@activityjapan.com）
-// 本文例:
-//   予約番号：2602197139378
-//   日時：2026年02月21日
-//   氏名：重松　純平(シゲマツ　ジュンペイ)
-//   電話番号：08041934538
-//   プラン名（コース名）：【...】（14:00 ）
-//   大人(中学生以上)×2 人
+// アクティビティジャパン
+// 氏名：重松　純平(シゲマツ　ジュンペイ)
+// 日時：2026年02月21日
+// プラン名（コース名）：...（14:00 ）
+// 大人(中学生以上)×2 人
+// 合計料金　　：14,000円
+// 支払方法：PayPay（ペイペイ）
 // ============================================================
 function parseActivityJapan(subject, body) {
-  const timeMatch   = body.match(/（(\d{1,2}:\d{2})\s*）/);
-  const nameKanji   = extract(body, [/氏名[：:]\s*([^\s\(（\t]+)/]);
-  const nameKana    = extract(body, [/氏名[：:]\s*[\s　]*[\(（]([^\)）]+)[\)）]/]);
-  const peopleMatch = [...body.matchAll(/[×x]\s*(\d+)\s*人/g)];
-  const totalPeople = peopleMatch.reduce((sum, m) => sum + parseInt(m[1], 10), 0);
+  const timeMatch    = body.match(/（(\d{1,2}:\d{2})\s*）/);
+  const nameMatch    = body.match(/氏名[：:]\s*([^\(（\r\n]+?)(?:\s*[\(（]([^\)）]+)[\)）])?[\r\n]/);
+  const peopleLines  = [...body.matchAll(/([^\n×x]+)[×x]\s*(\d+)\s*人/g)];
+  const totalPeople  = peopleLines.reduce((s, m) => s + parseInt(m[2], 10), 0);
+  const peopleDetail = peopleLines.length
+    ? peopleLines.map(m => `${m[1].trim()}×${m[2]}名`).join('・')
+    : '';
 
   return {
-    site:      'アクティビティジャパン',
-    bookingNo: extract(body, [/予約番号[：:]\s*(\d+)/]),
-    name:      nameKanji || nameKana,
-    date:      extract(body, [/日時[：:]\s*(\d{4}年\d{1,2}月\d{1,2}日)/]),
-    time:      timeMatch ? timeMatch[1] : '',
-    people:    totalPeople || extract(body, [/(\d+)\s*人/]),
-    email:     extract(body, [/メール[：:]\s*([\w.\-]+@[\w.\-]+)/]),
-    phone:     extract(body, [/電話番号[：:]\s*([\d\-\+]+)/]),
-    notes:     extract(body, [/備考[：:]\s*(.+)/]),
+    site:         'アクティビティジャパン',
+    bookingNo:    extract(body, [/予約番号[：:]\s*(\d+)/]),
+    name:         nameMatch ? nameMatch[1].trim() : '',
+    kana:         nameMatch && nameMatch[2] ? nameMatch[2].trim() : '',
+    date:         extract(body, [/日時[：:]\s*(\d{4}年\d{1,2}月\d{1,2}日)/]),
+    time:         timeMatch ? timeMatch[1] : '',
+    people:       totalPeople || '',
+    peopleDetail: peopleDetail,
+    amount:       extract(body, [/合計料金[\s　]*[：:]\s*([0-9,]+円)/]),
+    payment:      extract(body, [/支払方法[：:]\s*(.+)/]),
+    email:        extract(body, [/メール[：:]\s*([\w.\-]+@[\w.\-]+)/]),
+    phone:        extract(body, [/電話番号[：:]\s*([\d\-\+]+)/]),
+    notes:        extract(body, [/備考[：:]\s*(.+)/]),
   };
 }
 
 // ============================================================
-// ユーティリティ関数
+// ユーティリティ
 // ============================================================
 
 function extract(text, patterns) {
@@ -283,7 +312,6 @@ function parseDateTime(dateStr, timeStr) {
   try {
     let year, month, day, hour = 9, minute = 0;
 
-    // 日付がDateオブジェクトの場合（スプレッドシートから読み込んだ場合）
     if (dateStr instanceof Date) {
       year  = dateStr.getFullYear();
       month = dateStr.getMonth() + 1;
@@ -296,15 +324,12 @@ function parseDateTime(dateStr, timeStr) {
       [year, month, day] = parts.map(Number);
     }
 
-    // 時刻がDateオブジェクトの場合
     if (timeStr instanceof Date) {
       hour   = timeStr.getHours();
       minute = timeStr.getMinutes();
     } else {
       const timeNorm = String(timeStr).replace(/時/, ':').replace(/分/, '').trim();
-      if (timeNorm.includes(':')) {
-        [hour, minute] = timeNorm.split(':').map(Number);
-      }
+      if (timeNorm.includes(':')) [hour, minute] = timeNorm.split(':').map(Number);
     }
 
     const date = new Date(year, month - 1, day, hour, minute);
@@ -312,84 +337,88 @@ function parseDateTime(dateStr, timeStr) {
   } catch (e) { return null; }
 }
 
-// 既存データを読み込み（予約番号→行番号 と メッセージID のマップ）
 function loadExistingReservations(sheet) {
-  const data      = sheet.getDataRange().getValues();
+  const data        = sheet.getDataRange().getValues();
   const byBookingNo = new Map();
-  const byMsgId   = new Set();
+  const byMsgId     = new Set();
 
   for (let i = 1; i < data.length; i++) {
-    const row       = data[i];
-    const bookingNo = String(row[COLUMNS.BOOKING_NO - 1]).trim();
-    const msgId     = String(row[COLUMNS.MESSAGE_ID - 1]).trim();
-
-    if (bookingNo) byBookingNo.set(bookingNo, i + 1); // 1始まりの行番号
+    const bookingNo = String(data[i][COLUMNS.BOOKING_NO - 1]).trim();
+    const msgId     = String(data[i][COLUMNS.MESSAGE_ID - 1]).trim();
+    if (bookingNo) byBookingNo.set(bookingNo, i + 1);
     if (msgId)     byMsgId.add(msgId);
   }
   return { byBookingNo, byMsgId };
 }
 
-// 新規行を追加
-function appendToSheet(sheet, reservation, msgId, subject) {
+function appendToSheet(sheet, r, msgId, subject) {
   const bookingType   = detectBookingType(subject);
   const initialStatus = bookingType === '確定' ? '承認済' : '未確認';
 
   sheet.appendRow([
     new Date(),
     subject,
-    reservation.site      || '',
+    r.site         || '',
     bookingType,
-    reservation.bookingNo || '',
-    reservation.name      || '',
-    reservation.date      || '',
-    reservation.time      || '',
-    reservation.people    || '',
-    reservation.email     || '',
-    reservation.phone     || '',
-    reservation.notes     || '',
+    r.bookingNo    || '',
+    r.name         || '',
+    r.kana         || '',
+    r.date         || '',
+    r.time         || '',
+    r.people       || '',
+    r.peopleDetail || '',
+    r.amount       || '',
+    r.payment      || '',
+    r.email        || '',
+    r.phone        || '',
+    r.notes        || '',
     initialStatus,
     '',
     msgId,
   ]);
 }
 
-// 既存行を更新（仮予約→確定 など）
-function updateRow(sheet, rowNum, reservation, msgId, subject) {
-  const bookingType = detectBookingType(subject);
-
-  // 確定メールなら件名・タイプ・ステータスを上書き
-  // カレンダー登録済の場合はステータスを変えない
+function updateRow(sheet, rowNum, r, msgId, subject) {
+  const bookingType   = detectBookingType(subject);
   const currentStatus = sheet.getRange(rowNum, COLUMNS.STATUS).getValue();
-  const newStatus = bookingType === '確定' && currentStatus !== 'カレンダー登録済'
+  const newStatus     = bookingType === '確定' && currentStatus !== 'カレンダー登録済'
     ? '承認済' : currentStatus;
 
-  sheet.getRange(rowNum, COLUMNS.TIMESTAMP).setValue(new Date());
-  sheet.getRange(rowNum, COLUMNS.SUBJECT).setValue(subject);
-  sheet.getRange(rowNum, COLUMNS.BOOKING_TYPE).setValue(bookingType);
-  if (reservation.name)   sheet.getRange(rowNum, COLUMNS.NAME).setValue(reservation.name);
-  if (reservation.date)   sheet.getRange(rowNum, COLUMNS.DATE).setValue(reservation.date);
-  if (reservation.time)   sheet.getRange(rowNum, COLUMNS.TIME).setValue(reservation.time);
-  if (reservation.people) sheet.getRange(rowNum, COLUMNS.PEOPLE).setValue(reservation.people);
-  if (reservation.email)  sheet.getRange(rowNum, COLUMNS.EMAIL).setValue(reservation.email);
-  if (reservation.phone)  sheet.getRange(rowNum, COLUMNS.PHONE).setValue(reservation.phone);
-  sheet.getRange(rowNum, COLUMNS.STATUS).setValue(newStatus);
-  sheet.getRange(rowNum, COLUMNS.MESSAGE_ID).setValue(msgId);
+  const updates = {
+    [COLUMNS.TIMESTAMP]:     new Date(),
+    [COLUMNS.SUBJECT]:       subject,
+    [COLUMNS.BOOKING_TYPE]:  bookingType,
+    [COLUMNS.STATUS]:        newStatus,
+    [COLUMNS.MESSAGE_ID]:    msgId,
+  };
+  if (r.name)         updates[COLUMNS.NAME]          = r.name;
+  if (r.kana)         updates[COLUMNS.KANA]          = r.kana;
+  if (r.date)         updates[COLUMNS.DATE]          = r.date;
+  if (r.time)         updates[COLUMNS.TIME]          = r.time;
+  if (r.people)       updates[COLUMNS.PEOPLE]        = r.people;
+  if (r.peopleDetail) updates[COLUMNS.PEOPLE_DETAIL] = r.peopleDetail;
+  if (r.amount)       updates[COLUMNS.AMOUNT]        = r.amount;
+  if (r.payment)      updates[COLUMNS.PAYMENT]       = r.payment;
+  if (r.email)        updates[COLUMNS.EMAIL]         = r.email;
+  if (r.phone)        updates[COLUMNS.PHONE]         = r.phone;
+
+  Object.entries(updates).forEach(([col, val]) => {
+    sheet.getRange(rowNum, Number(col)).setValue(val);
+  });
 }
 
 function getOrCreateSheet(ss) {
   let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(CONFIG.SHEET_NAME);
-  }
+  if (!sheet) sheet = ss.insertSheet(CONFIG.SHEET_NAME);
 
-  // ヘッダーが正しく入っていない場合は常に上書き
   const headers = [
-    '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約番号', '予約者名',
-    '予約日', '予約時間', '人数', 'メールアドレス',
-    '電話番号', '備考', 'ステータス', 'カレンダーイベントID', 'メッセージID',
+    '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約番号',
+    '予約者名', 'フリガナ', '予約日', '予約時間', '人数',
+    '人数内訳', '金額', '支払方法', 'メールアドレス', '電話番号',
+    '備考', 'ステータス', 'カレンダーイベントID', 'メッセージID',
   ];
-  const firstCell = sheet.getRange(1, 1).getValue();
-  if (firstCell !== '処理日時') {
+
+  if (sheet.getRange(1, 1).getValue() !== '処理日時') {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, headers.length)
@@ -425,15 +454,13 @@ function setupTriggers() {
 }
 
 // ============================================================
-// 手動テスト用：最新1件をログに表示
+// 手動テスト用
 // ============================================================
 function testParseLatestEmail() {
   const threads = GmailApp.search(CONFIG.SEARCH_QUERY, 0, 1);
   if (!threads.length) { Logger.log('対象メールが見つかりませんでした'); return; }
-  const msg  = threads[0].getMessages()[0];
-  const body = msg.getPlainBody();
-  Logger.log('件名: '    + msg.getSubject());
-  Logger.log('差出人: '  + msg.getFrom());
-  Logger.log('SUP判定: ' + isSUP({}, body));
+  const msg = threads[0].getMessages()[0];
+  Logger.log('件名: '   + msg.getSubject());
+  Logger.log('差出人: ' + msg.getFrom());
   Logger.log(JSON.stringify(parseEmail(msg), null, 2));
 }
