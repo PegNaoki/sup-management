@@ -393,7 +393,7 @@ function enrichRecord(r, commRates) {
   r.commissionRate     = rate;
   r.commissionAmt      = Math.round(r.revenueGross * rate);
   r.revenueNet         = r.revenueGross - r.commissionAmt;
-  r.pricePerPax        = r.paxTotal > 0 ? Math.round(r.revenueNet / r.paxTotal) : 0;
+  r.pricePerPax        = r.paxTotal > 0 ? Math.round(r.revenueGross / r.paxTotal) : 0;
   r.priceTier          = calcPriceTier(r.activityDate);
   r.leadDays           = calcLeadDays(r.bookingDate, r.activityDate);
   r.regionSegment      = classifyRegion(r.prefecture);
@@ -468,24 +468,24 @@ function updateAnnualDashboard(ss) {
     const year = d.getFullYear();
     const ym   = `${year}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 
-    const gross = Number(row[DB.REVENUE_GROSS - 1])    || 0;
-    const com   = Number(row[DB.COMMISSION_AMT - 1])   || 0;
-    const net   = Number(row[DB.REVENUE_NET - 1])      || 0;
-    const pax   = Number(row[DB.PAX_TOTAL - 1])        || 0;
+    const grossVal = Number(row[DB.REVENUE_GROSS - 1])   || 0;
+    const comVal   = Number(row[DB.COMMISSION_AMT - 1])  || 0;
+    const netVal   = Number(row[DB.REVENUE_NET - 1])     || 0;
+    const paxVal   = Number(row[DB.PAX_TOTAL - 1])       || 0;
 
     if (!annual[year]) annual[year] = { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
     annual[year].bookings++;
-    annual[year].pax        += pax;
-    annual[year].gross      += gross;
-    annual[year].commission += com;
-    annual[year].net        += net;
+    annual[year].pax        += paxVal;
+    annual[year].gross      += grossVal;
+    annual[year].commission += comVal;
+    annual[year].net        += netVal;
 
     if (!monthly[ym]) monthly[ym] = { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
     monthly[ym].bookings++;
-    monthly[ym].pax        += pax;
-    monthly[ym].gross      += gross;
-    monthly[ym].commission += com;
-    monthly[ym].net        += net;
+    monthly[ym].pax        += paxVal;
+    monthly[ym].gross      += grossVal;
+    monthly[ym].commission += comVal;
+    monthly[ym].net        += netVal;
   }
 
   // 年間目標（月別目標を合算）
@@ -527,13 +527,14 @@ function updateAnnualDashboard(ss) {
   writeHeader(kpiLabels, '#4a86e8');
 
   const kpiDef = [
-    { label: '① 予約数（組）',            fmt: '#,##0',    get: a => a.bookings },
-    { label: '② 1予約あたり人数（人）',    fmt: '0.00',     get: a => a.bookings > 0 ? a.pax / a.bookings : 0 },
-    { label: '③ 1予約あたり売上（円）',    fmt: '¥#,##0',  get: a => a.bookings > 0 ? Math.round(a.net / a.bookings) : 0 },
-    { label: '④ 1人あたり単価（円）',      fmt: '¥#,##0',  get: a => a.pax > 0 ? Math.round(a.net / a.pax) : 0 },
-    { label: '⑤ 売上（円）',              fmt: '¥#,##0',  get: a => a.net },
-    { label: '⑥ 平均手数料率（％）',       fmt: '0.00%',   get: a => a.gross > 0 ? a.commission / a.gross : 0 },
-    { label: '⑦ 粗利率（％）',            fmt: '0.00%',   get: a => a.gross > 0 ? a.net / a.gross : 0 },
+    { label: '① 予約数（組）',                  fmt: '#,##0',   get: a => a.bookings,   tgtKey: 'bookings' },
+    { label: '② 1予約あたり人数（人）',          fmt: '0.00',    get: a => a.bookings > 0 ? a.pax / a.bookings : 0, tgtKey: null },
+    { label: '③ 1予約あたり売上【税込】（円）',  fmt: '¥#,##0', get: a => a.bookings > 0 ? Math.round(a.gross / a.bookings) : 0, tgtKey: null },
+    { label: '④ 1人あたり単価【税込】（円）',    fmt: '¥#,##0', get: a => a.pax > 0 ? Math.round(a.gross / a.pax) : 0, tgtKey: null },
+    { label: '⑤ 売上【税込】（円）',            fmt: '¥#,##0', get: a => a.gross,      tgtKey: 'revenue' },
+    { label: '⑤b 手取り・売上（手数料控除後）', fmt: '¥#,##0', get: a => a.net,        tgtKey: null },
+    { label: '⑥ 平均手数料率（％）',            fmt: '0.00%',  get: a => a.gross > 0 ? a.commission / a.gross : 0, tgtKey: null },
+    { label: '⑦ 粗利率（％）',                  fmt: '0.00%',  get: a => a.gross > 0 ? a.net / a.gross : 0, tgtKey: null },
   ];
 
   const tgtCurr = annualTargets[currentYear] || {};
@@ -543,8 +544,8 @@ function updateAnnualDashboard(ss) {
     const vals = sortedYears.map(y => kpi.get(annual[y]));
     let tgtVal = '';
     let achRate = '';
-    if (ki === 0) { tgtVal = tgtCurr.bookings || ''; }
-    else if (ki === 4) { tgtVal = tgtCurr.revenue  || ''; }
+    if (kpi.tgtKey === 'bookings') tgtVal = tgtCurr.bookings || '';
+    else if (kpi.tgtKey === 'revenue') tgtVal = tgtCurr.revenue || '';
 
     if (tgtVal && tgtVal > 0) {
       const actVal = kpi.get(actCurr);
@@ -578,7 +579,7 @@ function updateAnnualDashboard(ss) {
   // ── セクション2：月別推移（当年） ────────────────────────
   secHeader(`■ ${currentYear}年 月別KPI推移`);
 
-  const monthHeaders = ['月', '予約数', '人数', '売上(net)', '1予約あたり人数', '1人あたり単価', '平均手数料率', '粗利率', '目標_予約数', '目標_人数', '目標_売上', '達成率_売上'];
+  const monthHeaders = ['月', '予約数', '人数', '売上【税込】', '手取り', '1予約あたり人数', '1人あたり単価【税込】', '平均手数料率', '粗利率', '目標_予約数', '目標_人数', '目標_売上', '達成率_売上'];
   writeHeader(monthHeaders, '#6aa84f');
 
   const monthlyChartStartRow = row;
@@ -588,23 +589,24 @@ function updateAnnualDashboard(ss) {
     const tgt = targets[ym] || {};
 
     const pap  = md.bookings > 0 ? (md.pax  / md.bookings).toFixed(2) : '';
-    const upp  = md.pax      > 0 ? Math.round(md.net / md.pax)        : '';
+    const upp  = md.pax      > 0 ? Math.round(md.gross / md.pax)      : '';
     const comR = md.gross    > 0 ? md.commission / md.gross            : '';
     const grR  = md.gross    > 0 ? md.net / md.gross                  : '';
-    const achR = (tgt.revenue && tgt.revenue > 0) ? md.net / tgt.revenue : '';
+    const achR = (tgt.revenue && tgt.revenue > 0) ? md.gross / tgt.revenue : '';
 
     const rowVals = [
       `${m}月`,
-      md.bookings || '', md.pax || '', md.net || '',
+      md.bookings || '', md.pax || '', md.gross || '', md.net || '',
       pap, upp, comR, grR,
       tgt.bookings || '', tgt.pax || '', tgt.revenue || '', achR,
     ];
     dashSheet.getRange(row, 1, 1, rowVals.length).setValues([rowVals]);
 
     // 書式
-    dashSheet.getRange(row, 4).setNumberFormat('#,##0');
-    dashSheet.getRange(row, 6).setNumberFormat('#,##0');
-    dashSheet.getRange(row, 11).setNumberFormat('#,##0');
+    dashSheet.getRange(row, 4).setNumberFormat('#,##0'); // 売上税込
+    dashSheet.getRange(row, 5).setNumberFormat('#,##0'); // 手取り
+    dashSheet.getRange(row, 7).setNumberFormat('#,##0'); // 1人あたり単価
+    dashSheet.getRange(row, 12).setNumberFormat('#,##0'); // 目標_売上
     dashSheet.getRange(row, 7).setNumberFormat('0.0%');
     dashSheet.getRange(row, 8).setNumberFormat('0.0%');
     if (achR !== '') {
@@ -622,12 +624,12 @@ function updateAnnualDashboard(ss) {
   // 合計行
   const annCurr = annual[currentYear] || { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
   const tgtCurrTotal = annualTargets[currentYear] || {};
-  const totalAchR = (tgtCurrTotal.revenue > 0) ? annCurr.net / tgtCurrTotal.revenue : '';
+  const totalAchR = (tgtCurrTotal.revenue > 0) ? annCurr.gross / tgtCurrTotal.revenue : '';
   const totalRow = [
     '合計/平均',
-    annCurr.bookings || '', annCurr.pax || '', annCurr.net || '',
+    annCurr.bookings || '', annCurr.pax || '', annCurr.gross || '', annCurr.net || '',
     annCurr.bookings > 0 ? (annCurr.pax / annCurr.bookings).toFixed(2) : '',
-    annCurr.pax > 0 ? Math.round(annCurr.net / annCurr.pax) : '',
+    annCurr.pax > 0 ? Math.round(annCurr.gross / annCurr.pax) : '',
     annCurr.gross > 0 ? annCurr.commission / annCurr.gross : '',
     annCurr.gross > 0 ? annCurr.net / annCurr.gross : '',
     tgtCurrTotal.bookings || '', tgtCurrTotal.pax || '', tgtCurrTotal.revenue || '',
@@ -636,11 +638,12 @@ function updateAnnualDashboard(ss) {
   dashSheet.getRange(row, 1, 1, totalRow.length).setValues([totalRow])
     .setFontWeight('bold').setBackground('#e8f0fe');
   dashSheet.getRange(row, 4).setNumberFormat('#,##0');
-  dashSheet.getRange(row, 6).setNumberFormat('#,##0');
-  dashSheet.getRange(row, 11).setNumberFormat('#,##0');
-  dashSheet.getRange(row, 7).setNumberFormat('0.0%');
+  dashSheet.getRange(row, 5).setNumberFormat('#,##0');
+  dashSheet.getRange(row, 7).setNumberFormat('#,##0');
+  dashSheet.getRange(row, 12).setNumberFormat('#,##0');
   dashSheet.getRange(row, 8).setNumberFormat('0.0%');
-  if (totalAchR !== '') dashSheet.getRange(row, 12).setNumberFormat('0.0%');
+  dashSheet.getRange(row, 9).setNumberFormat('0.0%');
+  if (totalAchR !== '') dashSheet.getRange(row, 13).setNumberFormat('0.0%');
   row += 2;
 
   // ── セクション3：年度別推移グラフ ────────────────────────
@@ -718,25 +721,26 @@ function updateMonthlyDashboard(ss) {
 
     const ym  = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     const ch  = row[DB.CHANNEL - 1];
-    if (!monthly[ym]) monthly[ym] = { bookings: 0, pax: 0, revenue: 0, commissionAmt: 0, channels: {} };
+    if (!monthly[ym]) monthly[ym] = { bookings: 0, pax: 0, gross: 0, commissionAmt: 0, net: 0, channels: {} };
 
     monthly[ym].bookings++;
-    monthly[ym].pax     += Number(row[DB.PAX_TOTAL - 1])    || 0;
-    monthly[ym].revenue += Number(row[DB.REVENUE_NET - 1])  || 0;
+    monthly[ym].pax          += Number(row[DB.PAX_TOTAL - 1])      || 0;
+    monthly[ym].gross        += Number(row[DB.REVENUE_GROSS - 1])  || 0;
     monthly[ym].commissionAmt += Number(row[DB.COMMISSION_AMT - 1]) || 0;
-    if (!monthly[ym].channels[ch]) monthly[ym].channels[ch] = { bookings: 0, revenue: 0 };
+    monthly[ym].net          += Number(row[DB.REVENUE_NET - 1])    || 0;
+    if (!monthly[ym].channels[ch]) monthly[ym].channels[ch] = { bookings: 0, gross: 0 };
     monthly[ym].channels[ch].bookings++;
-    monthly[ym].channels[ch].revenue += Number(row[DB.REVENUE_NET - 1]) || 0;
+    monthly[ym].channels[ch].gross += Number(row[DB.REVENUE_GROSS - 1]) || 0;
   }
 
   // ダッシュボードシートに書き出し
   const rows = [
     [
       '年月',
-      '実績_予約数', '実績_人数', '実績_売上(net)',
+      '実績_予約数', '実績_人数', '実績_売上【税込】', '実績_手取り',
       '目標_予約数', '目標_人数', '目標_売上',
       '達成率_予約数', '達成率_人数', '達成率_売上',
-      '1予約あたり人数', '1人あたり単価',
+      '1予約あたり人数', '1人あたり単価【税込】',
       '手数料額', '手数料率',
       'AJ_件数', 'AJ_売上',
       'じゃらん_件数', 'じゃらん_売上',
@@ -752,25 +756,25 @@ function updateMonthlyDashboard(ss) {
     const tgt = targets[ym] || {};
     const ch  = m.channels;
 
-    const paxPerBooking  = m.bookings > 0 ? (m.pax / m.bookings).toFixed(2) : '';
-    const pricePerPax    = m.pax     > 0 ? Math.round(m.revenue / m.pax)   : '';
-    const commRate       = m.revenue > 0 ? (m.commissionAmt / (m.revenue + m.commissionAmt)) : '';
+    const paxPerBooking = m.bookings > 0 ? (m.pax / m.bookings).toFixed(2) : '';
+    const pricePerPax   = m.pax      > 0 ? Math.round(m.gross / m.pax)     : '';
+    const commRate      = m.gross    > 0 ? (m.commissionAmt / m.gross)      : '';
 
     rows.push([
       ym,
-      m.bookings, m.pax, m.revenue,
+      m.bookings, m.pax, m.gross, m.net,
       tgt.bookings || '', tgt.pax || '', tgt.revenue || '',
       tgt.bookings ? (m.bookings / tgt.bookings) : '',
       tgt.pax      ? (m.pax      / tgt.pax     ) : '',
-      tgt.revenue  ? (m.revenue  / tgt.revenue ) : '',
+      tgt.revenue  ? (m.gross    / tgt.revenue ) : '',
       paxPerBooking, pricePerPax,
       m.commissionAmt, commRate,
-      (ch['AJ']        || {}).bookings || 0, (ch['AJ']        || {}).revenue || 0,
-      (ch['じゃらん']   || {}).bookings || 0, (ch['じゃらん']   || {}).revenue || 0,
-      (ch['アソビュー'] || {}).bookings || 0, (ch['アソビュー'] || {}).revenue || 0,
-      (ch['Web予約']    || {}).bookings || 0, (ch['Web予約']    || {}).revenue || 0,
+      (ch['AJ']        || {}).bookings || 0, (ch['AJ']        || {}).gross || 0,
+      (ch['じゃらん']   || {}).bookings || 0, (ch['じゃらん']   || {}).gross || 0,
+      (ch['アソビュー'] || {}).bookings || 0, (ch['アソビュー'] || {}).gross || 0,
+      (ch['Web予約']    || {}).bookings || 0, (ch['Web予約']    || {}).gross || 0,
       ((ch['直接'] || {}).bookings || 0) + ((ch['ライン'] || {}).bookings || 0) + ((ch['インスタ'] || {}).bookings || 0),
-      ((ch['直接'] || {}).revenue  || 0) + ((ch['ライン'] || {}).revenue  || 0) + ((ch['インスタ'] || {}).revenue  || 0),
+      ((ch['直接'] || {}).gross    || 0) + ((ch['ライン'] || {}).gross    || 0) + ((ch['インスタ'] || {}).gross    || 0),
     ]);
   });
 
@@ -780,22 +784,32 @@ function updateMonthlyDashboard(ss) {
     .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
   dashSheet.setFrozenRows(1);
 
-  // 達成率列（H,I,J = 8,9,10）をパーセント書式に設定
+  // 書式設定（列: A=1,B=2...）
+  // ヘッダー: 年月(1),実績_予約数(2),実績_人数(3),実績_売上税込(4),実績_手取り(5),
+  //           目標_予約数(6),目標_人数(7),目標_売上(8),
+  //           達成率_予約数(9),達成率_人数(10),達成率_売上(11),
+  //           1予約あたり人数(12),1人あたり単価(13),手数料額(14),手数料率(15),
+  //           チャネル別(16〜25)
   if (rows.length > 1) {
     const dataRows = rows.length - 1;
-    dashSheet.getRange(2, 8, dataRows, 3).setNumberFormat('0.0%');
-    // 手数料率列（N=14）もパーセント
-    dashSheet.getRange(2, 14, dataRows, 1).setNumberFormat('0.0%');
-    // 売上系列は整数カンマ区切り
-    const revCols = [4, 6, 13, 16, 18, 20, 22, 24];
-    revCols.forEach(c => dashSheet.getRange(2, c, dataRows, 1).setNumberFormat('#,##0'));
-    // 達成率に色付け（100%以上=緑、80%未満=赤）
+    // 達成率列（I,J,K = 9,10,11）パーセント
+    dashSheet.getRange(2, 9, dataRows, 3).setNumberFormat('0.0%');
+    // 手数料率列（O=15）パーセント
+    dashSheet.getRange(2, 15, dataRows, 1).setNumberFormat('0.0%');
+    // 売上・手取り系列は整数カンマ区切り
+    [4, 5, 8, 13, 14, 17, 19, 21, 23, 25].forEach(c =>
+      dashSheet.getRange(2, c, dataRows, 1).setNumberFormat('#,##0')
+    );
+    // 手取り列（E=5）は薄いオレンジ背景で参考値であることを示す
+    dashSheet.getRange(1, 5).setBackground('#fce5cd').setFontColor('#ffffff');
+    dashSheet.getRange(2, 5, dataRows, 1).setBackground('#fff8f3');
+    // 達成率に色付け（100%以上=緑、80〜99%=黄、80%未満=赤）
     for (let r = 2; r <= rows.length; r++) {
-      [8, 9, 10].forEach(c => {
+      [9, 10, 11].forEach(c => {
         const cell = dashSheet.getRange(r, c);
         const v = cell.getValue();
         if (typeof v !== 'number' || v === 0) return;
-        if (v >= 1.0)   cell.setBackground('#b6d7a8');
+        if (v >= 1.0)    cell.setBackground('#b6d7a8');
         else if (v < 0.8) cell.setBackground('#f4cccc');
         else              cell.setBackground('#fff2cc');
       });
