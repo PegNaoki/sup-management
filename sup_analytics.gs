@@ -1359,6 +1359,7 @@ function buildWeeklySnapshot(refDate) {
   const yearTD   = blank();   // 今年累計（今年実施分）
   const lastYearTD = blank(); // 前年同月までの累計（同月比較用）
   let upcomingBookings = 0, upcomingPax = 0, upcomingGross = 0; // 今後の予約（先の参加日でキャンセル以外）
+  let upcomingThisMonthBookings = 0, upcomingThisMonthPax = 0, upcomingThisMonthGross = 0; // 今月内の先行予約
 
   for (let i = 1; i < dbData.length; i++) {
     const row = dbData[i];
@@ -1373,7 +1374,14 @@ function buildWeeklySnapshot(refDate) {
     if (d.getFullYear() === year && d.getMonth() + 1 === month) acc(monthTD, row);
     if (d.getFullYear() === year) acc(yearTD, row);
     if (d.getFullYear() === year - 1 && (d.getMonth() + 1) <= month) acc(lastYearTD, row);
-    if (d > today) { upcomingBookings++; upcomingPax += Number(row[DB.PAX_TOTAL-1])||0; upcomingGross += Number(row[DB.REVENUE_GROSS-1])||0; }
+    if (d > today) {
+      const g = Number(row[DB.REVENUE_GROSS-1])||0;
+      const p = Number(row[DB.PAX_TOTAL-1])||0;
+      upcomingBookings++; upcomingPax += p; upcomingGross += g;
+      if (d.getFullYear() === year && d.getMonth() + 1 === month) {
+        upcomingThisMonthBookings++; upcomingThisMonthPax += p; upcomingThisMonthGross += g;
+      }
+    }
   }
 
   // 月目標・年目標
@@ -1488,6 +1496,18 @@ function buildWeeklySnapshot(refDate) {
     },
     upcoming: {
       bookings: upcomingBookings, pax: upcomingPax, gross: upcomingGross,
+      thisMonth: {
+        bookings: upcomingThisMonthBookings,
+        pax:      upcomingThisMonthPax,
+        gross:    upcomingThisMonthGross,
+      },
+    },
+    // 着地見込み = 今月実績 + 今月内の先行予約
+    landingForecast: {
+      bookings: monthTD.bookings + upcomingThisMonthBookings,
+      pax:      monthTD.pax     + upcomingThisMonthPax,
+      gross:    monthTD.gross   + upcomingThisMonthGross,
+      achievementVsTarget: pct(monthTD.gross + upcomingThisMonthGross, monthTgt.revenue),
     },
     weekdayProfile: {
       month: { totalDays: daysInMonth, weekendDays: weekendThisMonth, weekdays: daysInMonth - weekendThisMonth },
@@ -1602,44 +1622,68 @@ function callClaudeAPI(prompt) {
 
 // 分析プロンプトの組み立て
 function buildAnalysisPrompt(snapshot) {
-  const wp = snapshot.weekdayProfile;
+  const s   = snapshot;
+  const mtd = s.monthToDate;
+  const lf  = s.landingForecast;
+  const lyc = s.lastYearComparison;
+  const ytd = s.yearToDate;
+  const wp  = s.weekdayProfile;
+  const up  = s.upcoming;
+
+  const yen    = (v) => v != null ? `¥${Math.round(v).toLocaleString()}` : '-';
+  const pctStr = (v) => v != null ? `${Math.round(v * 100)}%` : '-';
+  const num    = (v) => v != null ? String(v) : '-';
+
   const weekendNote = wp
-    ? `今月の土日日数: ${wp.month.weekendDays}日（前年同月: ${wp.lastYearSameMonth.weekendDays}日、差: ${wp.weekendDaysDiff > 0 ? '+' : ''}${wp.weekendDaysDiff}日）`
+    ? `今月の土日日数: ${wp.month.weekendDays}日（前年同月: ${wp.lastYearSameMonth.weekendDays}日、差: ${wp.weekendDaysDiff >= 0 ? '+' : ''}${wp.weekendDaysDiff}日）`
     : '';
+
+  // Claude に渡す数値サマリー（変数名ではなく日本語ラベルで）
+  const dataBlock = [
+    `【今月実績】予約: ${num(mtd.bookings)}件 / 人数: ${num(mtd.pax)}人 / 売上: ${yen(mtd.gross)} / 手取り: ${yen(mtd.net)} / 客単価: ${yen(mtd.unitGross)}`,
+    `【今月目標】予約: ${num(mtd.target.bookings)}件 / 人数: ${num(mtd.target.pax)}人 / 売上: ${yen(mtd.target.revenue)}`,
+    `【今月達成率】予約: ${pctStr(mtd.achievement.bookings)} / 人数: ${pctStr(mtd.achievement.pax)} / 売上: ${pctStr(mtd.achievement.revenue)}`,
+    `【今月内の先行予約（確定済み）】${num(up.thisMonth.bookings)}件 / ${num(up.thisMonth.pax)}人 / ${yen(up.thisMonth.gross)}`,
+    `【着地見込み（実績+今月内先行）】予約: ${num(lf.bookings)}件 / 人数: ${num(lf.pax)}人 / 売上: ${yen(lf.gross)} / 月目標達成率見込み: ${pctStr(lf.achievementVsTarget)}`,
+    `【前年同期比】売上: ${pctStr(lyc.yoyGrossChangePct)} / 予約数: ${pctStr(lyc.yoyBookingsChangePct)} / 客単価: ${pctStr(lyc.yoyUnitGrossChangePct)}（前年客単価: ${yen(lyc.lastYearUnitGross)}、今年: ${yen(ytd.unitGross)}）`,
+    `【チャネル別（今月）】${mtd.channels.map(c => `${c.channel} ${c.bookings}件 ${yen(c.gross)}`).join(' / ')}`,
+    weekendNote,
+    `【今後の全先行予約】${num(up.bookings)}件 / ${num(up.pax)}人 / ${yen(up.gross)}`,
+    `【シーズン段階】${s.period.month}月（${s.period.month <= 6 ? 'シーズン初期' : s.period.month <= 8 ? '最盛期' : 'シーズン終盤'}）`,
+  ].filter(Boolean).join('\n');
 
   return [
     'あなたはSUP（スタンドアップパドルボード）体験事業の経営アナリストです。',
-    '以下の週次データを分析し、経営者向けの日本語レポートを作成してください。',
+    '以下のデータを基に、経営者向けの週次レポートを日本語で作成してください。',
     '',
     '# 事業概要',
-    '- 福島県の屋外SUP体験事業（裏磐梯）',
-    '- 営業期間：5〜10月のみ（冬季はオフシーズン）',
-    '- 予約経路：OTA（じゃらん／AJ／アソビュー、手数料16.5%）、自社HP予約satsuki（手数料3%）、直接予約（LINE／インスタ／その他、手数料0%）',
-    '- 「売上」は税込（お客様支払額）、「手取り」は手数料控除後',
-    weekendNote,
+    '- 福島県・裏磐梯の屋外SUP体験（営業期間5〜10月）',
+    '- 予約経路：OTA（じゃらん／AJ／アソビュー、手数料16.5%）／自社HP satsuki（3%）／直接（LINE・インスタ等、0%）',
+    '- 売上＝税込客付額、手取り＝手数料控除後',
     '',
-    '# 今週時点のデータ（JSON）',
-    '```json',
-    JSON.stringify(snapshot, null, 2),
-    '```',
+    '# 今週のデータ',
+    dataBlock,
     '',
-    '# 注意事項（必ず守ること）',
-    '- 数値の引用はJSONの値をそのまま使い、自分で計算しないこと（計算誤りを防ぐため）',
-    '- 客単価はunitGrossフィールドの値を使うこと',
-    '- 前年比はyoyGrossChangePct・yoyBookingsChangePct・yoyUnitGrossChangePctフィールドを使うこと',
-    '- シーズンの段階（初期5-6月／最盛期7-8月／終盤9-10月）を踏まえた評価をすること',
-    '- upcoming（今後の確定予約）も踏まえて先行きを評価すること',
+    '# 注意事項',
+    '- レポート本文に英語の変数名・フィールド名を出さないこと（「landingForecast」「ytd」などはNG）',
+    '- 数値は上記のデータをそのまま引用し、自分で計算しないこと',
+    '- 「実績」と「着地見込み」を明確に区別して書くこと',
+    '- 施策提案は「誰が・いつまでに・何をするか」のタスク形式で書くこと',
     '',
-    '# 出力フォーマット（Markdown、このセクション2つだけ出力）',
+    '# 出力フォーマット（以下の3セクションのみ）',
+    '',
     '## 🔍 差異の原因仮説',
-    '（目標・前年との差が生じている要因を、曜日構成・チャネル変化・単価・人数の観点から2〜3点。数値を具体的に引用）',
+    '目標・前年との差が生じている要因を2〜3点、数値を引用しながら分析する。',
+    '曜日構成・チャネル変化・客単価・人数の変化の観点を含めること。',
     '',
-    '## ✅ 具体的アクション提案',
-    '優先順位をつけて以下の2グループに分けて記述：',
-    '### 来週中に実行できること',
-    '（価格変更、SNS投稿、OTA露出強化など、今すぐできる施策を2〜3つ。なぜ効くかも一言）',
-    '### 今月残りで挽回できる施策',
-    '（残り期間での売上回復・チャネル改善策を1〜2つ）',
+    '## ✅ アクション提案',
+    '### 来週中に実行すること',
+    '各施策を「【担当】【期限】【内容】【期待効果】」の形式で2〜3件',
+    '### 今月残りで取り組む施策',
+    '「【担当】【期限】【内容】【期待効果】」の形式で1〜2件',
+    '',
+    '## 🎯 今週やることTOP3',
+    '優先度順に3行で箇条書き（各1行、簡潔に）',
   ].join('\n');
 }
 
@@ -1661,6 +1705,7 @@ function createWeeklyReportDoc(snapshot, analysisText) {
   const ytd  = snapshot.yearToDate;
   const lyc  = snapshot.lastYearComparison;
   const up   = snapshot.upcoming;
+  const lf   = snapshot.landingForecast;
   const tgt  = mtd.target;
   const ach  = mtd.achievement;
   const ytdA = ytd.ytdAchievement;
@@ -1676,17 +1721,18 @@ function createWeeklyReportDoc(snapshot, analysisText) {
   // ===== 現状把握 =====
   body.appendParagraph('📊 現状把握').setHeading(DocumentApp.ParagraphHeading.HEADING2);
 
-  // 今月 目標 vs 実績
+  // 今月 目標 vs 実績 vs 着地見込み
   body.appendParagraph(`今月実績 vs 目標 (${snapshot.period.year}年${snapshot.period.month}月)`)
     .setHeading(DocumentApp.ParagraphHeading.HEADING3);
   _styleTable(body.appendTable([
-    ['指標', '目標', '実績', '達成率'],
-    ['予約数', num(tgt.bookings) + '件', mtd.bookings + '件', pctStr(ach.bookings)],
-    ['人数',   num(tgt.pax)      + '人', mtd.pax      + '人', pctStr(ach.pax)],
-    ['売上',   yen(tgt.revenue),          yen(mtd.gross),      pctStr(ach.revenue)],
-    ['手取り', '-',                        yen(mtd.net),        '-'],
-    ['客単価', '-',                        yen(mtd.unitGross),  '-'],
+    ['指標', '目標', '実績', '実績達成率', '着地見込み', '着地達成率'],
+    ['予約数', num(tgt.bookings) + '件', mtd.bookings + '件', pctStr(ach.bookings), lf.bookings + '件', '-'],
+    ['人数',   num(tgt.pax)      + '人', mtd.pax      + '人', pctStr(ach.pax),      lf.pax      + '人', '-'],
+    ['売上',   yen(tgt.revenue),          yen(mtd.gross),      pctStr(ach.revenue),  yen(lf.gross),       pctStr(lf.achievementVsTarget)],
+    ['手取り', '-',                        yen(mtd.net),        '-',                  '-',                 '-'],
+    ['客単価', '-',                        yen(mtd.unitGross),  '-',                  '-',                 '-'],
   ]));
+  body.appendParagraph('※着地見込み = 今月実績 + 今月内の確定先行予約（' + up.thisMonth.bookings + '件 / ' + yen(up.thisMonth.gross) + '）');
 
   // 前年同月比
   body.appendParagraph('前年同月比 (累計)').setHeading(DocumentApp.ParagraphHeading.HEADING3);
