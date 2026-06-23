@@ -838,8 +838,18 @@ function loadTargets(sheet) {
   const col     = buildColMap(headers);
   const targets = {};
   for (let i = 1; i < data.length; i++) {
-    const ym = String(data[i][col['年月']] || '').trim();
+    const raw = data[i][col['年月']];
+    if (!raw) continue;
+
+    // 日付オブジェクト・文字列どちらでも "YYYY-MM" 形式に統一
+    let ym;
+    if (raw instanceof Date) {
+      ym = `${raw.getFullYear()}-${String(raw.getMonth() + 1).padStart(2, '0')}`;
+    } else {
+      ym = String(raw).trim();
+    }
     if (!ym || ym.startsWith('（')) continue;
+
     targets[ym] = {
       bookings: Number(data[i][col['目標_予約数']]) || 0,
       pax:      Number(data[i][col['目標_人数']])   || 0,
