@@ -9,6 +9,10 @@ const CONFIG = {
   EVENT_DURATION_HOURS: 2,
   PROCESSED_LABEL:    'SUP予約/処理済',
 
+  // 午前・午後の上限人数（超えそうな場合に警告）
+  MORNING_LIMIT:   12,  // 午前枠（～12:00）の上限
+  AFTERNOON_LIMIT: 12,  // 午後枠（12:00～）の上限
+
   SEARCH_QUERY: 'in:anywhere (SUP OR サップ) ('
     + 'from:reservation@activityboard.jp'
     + ' OR from:reservation_request@activityboard.jp'
@@ -17,8 +21,10 @@ const CONFIG = {
     + ')',
 };
 
-const CONFIRMED_KEYWORDS = ['予約確定', '即時確定', '決済完了', '予約が確定'];
-const TENTATIVE_KEYWORDS = ['仮予約', '予約のリクエスト'];
+const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定'];
+const TENTATIVE_KEYWORDS  = ['仮予約', '予約のリクエスト'];
+const CANCEL_KEYWORDS     = ['キャンセル通知', 'キャンセルされました', 'キャンセルのご連絡', '予約取消'];
+const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
 
 const COLUMNS = {
   TIMESTAMP:       1,  // A: 処理日時
@@ -44,48 +50,61 @@ const COLUMNS = {
 };
 
 // ============================================================
-// メイン処理：メール取込（トリガー用・直近50件）
+// メイン処理：メール取込
 // ============================================================
 function importReservationEmails() {
   importEmails_(50);
 }
 
-// 過去メール全件一括取込（手動実行用）
 function importAllHistoricalEmails() {
   importEmails_(500);
 }
 
 function importEmails_(limit) {
-  const ss      = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  const sheet   = getOrCreateSheet(ss);
-  const label   = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
-  const threads = GmailApp.search(CONFIG.SEARCH_QUERY, 0, limit);
+  const ss       = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet    = getOrCreateSheet(ss);
+  const label    = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
+  const threads  = GmailApp.search(CONFIG.SEARCH_QUERY, 0, limit);
   const existing = loadExistingReservations(sheet);
 
-  let newCount = 0, updateCount = 0;
+  let newCount = 0, updateCount = 0, cancelCount = 0;
 
   threads.forEach(thread => {
     thread.getMessages().forEach(message => {
-      const msgId = message.getId();
+      const msgId   = message.getId();
       if (existing.byMsgId.has(msgId)) return;
 
-      const r = parseEmail(message);
+      const subject     = message.getSubject();
+      const bookingType = detectBookingType(subject);
+      const r           = parseEmail(message);
       if (!r) return;
 
       const existingRow = r.bookingNo ? existing.byBookingNo.get(r.bookingNo) : null;
-      if (existingRow) {
-        updateRow(sheet, existingRow, r, msgId, message.getSubject());
+
+      if (bookingType === 'キャンセル') {
+        // キャンセル処理
+        if (existingRow) {
+          handleCancellation(sheet, existingRow, msgId, subject);
+          cancelCount++;
+        }
+      } else if (existingRow) {
+        // 既存行を更新（変更・確定など）
+        updateRow(sheet, existingRow, r, msgId, subject, bookingType);
         updateCount++;
       } else {
-        appendToSheet(sheet, r, msgId, message.getSubject());
+        // 新規追加
+        appendToSheet(sheet, r, msgId, subject, bookingType);
         newCount++;
       }
     });
     thread.addLabel(label);
   });
 
-  if (newCount > 0 || updateCount > 0) SpreadsheetApp.flush();
-  Logger.log(`取込完了：新規${newCount}件・更新${updateCount}件（対象${threads.length}スレッド）`);
+  if (newCount > 0 || updateCount > 0 || cancelCount > 0) SpreadsheetApp.flush();
+  Logger.log(`取込完了：新規${newCount}件・更新${updateCount}件・キャンセル${cancelCount}件（対象${threads.length}スレッド）`);
+
+  // 取込後に容量チェック
+  checkCapacityWarnings(sheet);
 }
 
 // ============================================================
@@ -102,7 +121,7 @@ function registerApprovedToCalendar() {
   }
 
   const data = sheet.getDataRange().getValues();
-  let updatedCount = 0;
+  let registeredCount = 0;
 
   for (let i = 1; i < data.length; i++) {
     const row        = data[i];
@@ -129,51 +148,129 @@ function registerApprovedToCalendar() {
       continue;
     }
 
-    const endDate = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
-
-    // タイトル例：【じゃらんnet】ナカヤマ カナコ｜2名｜7,000円｜カード決済
+    const endDate       = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
     const displayName   = kana || name;
     const peopleStr     = peopleDetail || `${people}名`;
-    const amountStr     = amount ? `${amount}` : '';
-    const paymentStr    = payment || '';
-    const titleParts    = [`【${site}】${displayName}`, peopleStr, amountStr, paymentStr]
-                            .filter(Boolean);
-    const title = titleParts.join('｜');
-
-    // 説明文
-    const description = [
+    const titleParts    = [`【${site}】${displayName}`, peopleStr, amount, payment].filter(Boolean);
+    const title         = titleParts.join('｜');
+    const description   = [
       `予約者: ${name}`,
-      kana         ? `フリガナ: ${kana}`           : '',
-      phone        ? `電話番号: ${phone}`           : '',
-      email        ? `メール: ${email}`             : '',
-      peopleDetail ? `人数内訳: ${peopleDetail}`    : `人数: ${people}名`,
-      amount       ? `金額: ${amount}`              : '',
-      payment      ? `支払方法: ${payment}`         : '',
-      notes        ? `備考: ${notes}`               : '',
+      kana         ? `フリガナ: ${kana}`        : '',
+      phone        ? `電話番号: ${phone}`        : '',
+      email        ? `メール: ${email}`          : '',
+      peopleDetail ? `人数内訳: ${peopleDetail}` : `人数: ${people}名`,
+      amount       ? `金額: ${amount}`           : '',
+      payment      ? `支払方法: ${payment}`      : '',
+      notes        ? `備考: ${notes}`            : '',
     ].filter(Boolean).join('\n');
 
     try {
       const event = calendar.createEvent(title, startDate, endDate, { description });
       sheet.getRange(i + 1, COLUMNS.STATUS).setValue('カレンダー登録済');
       sheet.getRange(i + 1, COLUMNS.CALENDAR_ID_COL).setValue(event.getId());
-      updatedCount++;
+      registeredCount++;
     } catch (e) {
       Logger.log(`行${i + 1} カレンダー登録エラー: ${e.message}`);
     }
   }
 
-  if (updatedCount > 0) {
+  if (registeredCount > 0) {
     SpreadsheetApp.flush();
-    Logger.log(`${updatedCount}件をカレンダーに登録しました`);
+    Logger.log(`${registeredCount}件をカレンダーに登録しました`);
   }
+}
+
+// ============================================================
+// キャンセル処理
+// ============================================================
+function handleCancellation(sheet, rowNum, msgId, subject) {
+  // ステータスをキャンセルに更新
+  sheet.getRange(rowNum, COLUMNS.STATUS).setValue('キャンセル');
+  sheet.getRange(rowNum, COLUMNS.TIMESTAMP).setValue(new Date());
+  sheet.getRange(rowNum, COLUMNS.SUBJECT).setValue(subject);
+  sheet.getRange(rowNum, COLUMNS.MESSAGE_ID).setValue(msgId);
+
+  // カレンダーイベントが登録済みなら【キャンセル】を付ける
+  const calEventId = sheet.getRange(rowNum, COLUMNS.CALENDAR_ID_COL).getValue();
+  if (!calEventId) return;
+
+  try {
+    const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+    const event    = calendar.getEventById(calEventId);
+    if (event) {
+      const newTitle = '【キャンセル】' + event.getTitle();
+      event.setTitle(newTitle);
+      event.setColor(CalendarApp.EventColor.GRAY);
+      Logger.log(`カレンダーイベントをキャンセル表記に変更: ${newTitle}`);
+    }
+  } catch (e) {
+    Logger.log(`カレンダー更新エラー: ${e.message}`);
+  }
+}
+
+// ============================================================
+// 容量警告チェック（日付×午前午後ごとに集計）
+// ============================================================
+function checkCapacityWarnings(sheet) {
+  const data     = sheet.getDataRange().getValues();
+  const capacity = {}; // { '2026/07/15_AM': 人数, '2026/07/15_PM': 人数 }
+
+  for (let i = 1; i < data.length; i++) {
+    const row    = data[i];
+    const status = row[COLUMNS.STATUS - 1];
+    if (['キャンセル', '却下'].includes(status)) continue;
+
+    const dateVal = row[COLUMNS.DATE - 1];
+    const timeVal = row[COLUMNS.TIME - 1];
+    const people  = parseInt(row[COLUMNS.PEOPLE - 1], 10);
+    if (!dateVal || isNaN(people)) continue;
+
+    const dateStr = dateVal instanceof Date
+      ? `${dateVal.getFullYear()}/${dateVal.getMonth()+1}/${dateVal.getDate()}`
+      : String(dateVal);
+
+    let hour = 9;
+    if (timeVal instanceof Date) {
+      hour = timeVal.getHours();
+    } else {
+      const m = String(timeVal).match(/(\d{1,2}):/);
+      if (m) hour = parseInt(m[1], 10);
+    }
+
+    const slot = hour < 12 ? `${dateStr}_AM` : `${dateStr}_PM`;
+    capacity[slot] = (capacity[slot] || 0) + people;
+  }
+
+  const warnings = [];
+  for (const [slot, total] of Object.entries(capacity)) {
+    const [date, period] = slot.split('_');
+    const limit = period === 'AM' ? CONFIG.MORNING_LIMIT : CONFIG.AFTERNOON_LIMIT;
+    if (total >= limit) {
+      warnings.push(`⚠️ ${date} ${period === 'AM' ? '午前' : '午後'}：${total}名 / 上限${limit}名`);
+    }
+  }
+
+  if (warnings.length > 0) {
+    Logger.log('【容量警告】\n' + warnings.join('\n'));
+  }
+
+  return warnings;
+}
+
+// 容量警告を手動確認（単体実行用）
+function checkCapacityWarningsManual() {
+  const ss      = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet   = getOrCreateSheet(ss);
+  const warnings = checkCapacityWarnings(sheet);
+  if (warnings.length === 0) Logger.log('容量に問題はありません');
 }
 
 // ============================================================
 // メール解析
 // ============================================================
 function parseEmail(message) {
-  const from = message.getFrom();
-  const body = message.getPlainBody();
+  const from    = message.getFrom();
+  const body    = message.getPlainBody();
   const subject = message.getSubject();
 
   if (from.includes('activityboard.jp'))              return parseJalan(subject, body);
@@ -184,22 +281,13 @@ function parseEmail(message) {
 
 // ============================================================
 // じゃらんnet
-// 体験者氏名：中山 加奈子(ナカヤマ　カナコ)様
-// 利用日時：2026/07/18(土) 09:30～11:30
-// 人数：2名
-// 合計料金(税込)：7,000円
-// 支払方法：オンラインカード決済
 // ============================================================
 function parseJalan(subject, body) {
   const dtMatch   = body.match(/利用日時[：:]\s*(\d{4})\/(\d{1,2})\/(\d{1,2})[^0-9]*(\d{1,2}:\d{2})/);
   const nameMatch = body.match(/体験者氏名[：:]\s*(.+?)(?:（|\()([^）)]+)(?:）|\))\s*様/);
-
-  // 人数内訳（例：大人×2名、子供×1名）
-  const peopleRows   = [...body.matchAll(/([^：\n]+)[：:]\s*(\d+)\s*名/g)]
-                         .filter(m => ['大人', '小人', '子供', 'お一人'].some(k => m[1].includes(k)));
-  const peopleDetail = peopleRows.length
-    ? peopleRows.map(m => `${m[1].trim()}${m[2]}名`).join('・')
-    : '';
+  const peopleRows = [...body.matchAll(/([^：\n]+)[：:]\s*(\d+)\s*名/g)]
+    .filter(m => ['大人', '小人', '子供', 'お一人'].some(k => m[1].includes(k)));
+  const peopleDetail = peopleRows.map(m => `${m[1].trim()}${m[2]}名`).join('・');
 
   return {
     site:         'じゃらんnet',
@@ -220,24 +308,13 @@ function parseJalan(subject, body) {
 
 // ============================================================
 // アソビュー／satsuki
-// 予約代表者氏名 | 八角 亮 様
-// 予約代表者氏名カナ | ヤスミ リョウ サマ
-// ◆催行日 | 2026 年 07 月 15 日
-// ◆コース | 10:00
-// 大人 13〜70歳 | 8500円 × 6名
-// ◆提示金額 | 48000円（税込）
-// ◆支払い方法 | 現地払い
 // ============================================================
 function parseAsoview(subject, body) {
   const dateMatch    = body.match(/◆催行日\s*\|\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   const dateStr      = dateMatch ? `${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]}` : '';
-
-  // 人数内訳と合計
   const peopleLines  = [...body.matchAll(/^(.+?)\s*\|\s*\d+円\s*[×x]\s*(\d+)\s*名/gm)];
   const totalPeople  = peopleLines.reduce((s, m) => s + parseInt(m[2], 10), 0);
-  const peopleDetail = peopleLines.length
-    ? peopleLines.map(m => `${m[1].trim()}×${m[2]}名`).join('・')
-    : '';
+  const peopleDetail = peopleLines.map(m => `${m[1].trim()}×${m[2]}名`).join('・');
 
   return {
     site:         'アソビュー/satsuki',
@@ -258,21 +335,13 @@ function parseAsoview(subject, body) {
 
 // ============================================================
 // アクティビティジャパン
-// 氏名：重松　純平(シゲマツ　ジュンペイ)
-// 日時：2026年02月21日
-// プラン名（コース名）：...（14:00 ）
-// 大人(中学生以上)×2 人
-// 合計料金　　：14,000円
-// 支払方法：PayPay（ペイペイ）
 // ============================================================
 function parseActivityJapan(subject, body) {
   const timeMatch    = body.match(/（(\d{1,2}:\d{2})\s*）/);
   const nameMatch    = body.match(/氏名[：:]\s*([^\(（\r\n]+?)(?:\s*[\(（]([^\)）]+)[\)）])?[\r\n]/);
   const peopleLines  = [...body.matchAll(/([^\n×x]+)[×x]\s*(\d+)\s*人/g)];
   const totalPeople  = peopleLines.reduce((s, m) => s + parseInt(m[2], 10), 0);
-  const peopleDetail = peopleLines.length
-    ? peopleLines.map(m => `${m[1].trim()}×${m[2]}名`).join('・')
-    : '';
+  const peopleDetail = peopleLines.map(m => `${m[1].trim()}×${m[2]}名`).join('・');
 
   return {
     site:         'アクティビティジャパン',
@@ -304,13 +373,23 @@ function extract(text, patterns) {
 }
 
 function detectBookingType(subject) {
+  for (const kw of CANCEL_KEYWORDS)    if (subject.includes(kw)) return 'キャンセル';
+  for (const kw of CHANGE_KEYWORDS)    if (subject.includes(kw)) return '変更';
   for (const kw of CONFIRMED_KEYWORDS) if (subject.includes(kw)) return '確定';
   for (const kw of TENTATIVE_KEYWORDS) if (subject.includes(kw)) return '仮予約';
   return '不明';
 }
 
 function initialStatus(bookingType) {
-  return bookingType === '確定' ? '承認済' : '未対応';
+  if (bookingType === '確定') return '承認済';
+  if (bookingType === 'キャンセル') return 'キャンセル';
+  return '未対応';
+}
+
+// 日付・時刻・人数が読み取れない場合は「要確認」を返す
+function resolveStatus(bookingType, r) {
+  if (!r.date || !r.time || !r.people) return '要確認';
+  return initialStatus(bookingType);
 }
 
 function parseDateTime(dateStr, timeStr) {
@@ -356,9 +435,7 @@ function loadExistingReservations(sheet) {
   return { byBookingNo, byMsgId };
 }
 
-function appendToSheet(sheet, r, msgId, subject) {
-  const bookingType = detectBookingType(subject);
-
+function appendToSheet(sheet, r, msgId, subject, bookingType) {
   sheet.appendRow([
     new Date(),
     subject,
@@ -376,25 +453,28 @@ function appendToSheet(sheet, r, msgId, subject) {
     r.email        || '',
     r.phone        || '',
     r.notes        || '',
-    initialStatus(bookingType),
-    '',   // 対応メモ（空欄）
+    resolveStatus(bookingType, r),
+    '',   // 対応メモ
     '',   // カレンダーイベントID
     msgId,
   ]);
 }
 
-function updateRow(sheet, rowNum, r, msgId, subject) {
-  const bookingType   = detectBookingType(subject);
+function updateRow(sheet, rowNum, r, msgId, subject, bookingType) {
   const currentStatus = sheet.getRange(rowNum, COLUMNS.STATUS).getValue();
-  const newStatus     = bookingType === '確定' && currentStatus !== 'カレンダー登録済'
-    ? '承認済' : currentStatus;
+
+  // カレンダー登録済・キャンセルはステータスを変えない
+  let newStatus = currentStatus;
+  if (!['カレンダー登録済', 'キャンセル'].includes(currentStatus)) {
+    newStatus = resolveStatus(bookingType, r);
+  }
 
   const updates = {
-    [COLUMNS.TIMESTAMP]:     new Date(),
-    [COLUMNS.SUBJECT]:       subject,
-    [COLUMNS.BOOKING_TYPE]:  bookingType,
-    [COLUMNS.STATUS]:        newStatus,
-    [COLUMNS.MESSAGE_ID]:    msgId,
+    [COLUMNS.TIMESTAMP]:    new Date(),
+    [COLUMNS.SUBJECT]:      subject,
+    [COLUMNS.BOOKING_TYPE]: bookingType,
+    [COLUMNS.STATUS]:       newStatus,
+    [COLUMNS.MESSAGE_ID]:   msgId,
   };
   if (r.name)         updates[COLUMNS.NAME]          = r.name;
   if (r.kana)         updates[COLUMNS.KANA]          = r.kana;
@@ -430,7 +510,7 @@ function getOrCreateSheet(ss) {
       .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
 
     const rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(['未対応', '対応中', '承認済', '却下', 'キャンセル', 'カレンダー登録済'])
+      .requireValueInList(['未対応', '対応中', '承認済', '要確認', '却下', 'キャンセル', 'カレンダー登録済'])
       .build();
     sheet.getRange(2, COLUMNS.STATUS, 1000, 1).setDataValidation(rule);
     sheet.hideColumns(COLUMNS.MESSAGE_ID);
