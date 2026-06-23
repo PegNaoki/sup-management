@@ -1522,7 +1522,7 @@ function callClaudeAPI(prompt) {
   const key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   if (!key) throw new Error('ANTHROPIC_API_KEY が未設定です（スクリプトプロパティに登録してください）');
 
-  const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+  const requestOptions = {
     method: 'post',
     contentType: 'application/json',
     headers: {
@@ -1535,14 +1535,32 @@ function callClaudeAPI(prompt) {
       messages: [{ role: 'user', content: prompt }],
     }),
     muteHttpExceptions: true,
-  });
+  };
 
-  const code = res.getResponseCode();
-  if (code !== 200) {
-    throw new Error(`Claude APIエラー (${code}): ${res.getContentText()}`);
+  const maxRetries = 4;
+  const retryDelays = [2000, 4000, 8000, 16000];
+  const retryableCodes = [429, 529];
+
+  let lastCode, lastBody;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', requestOptions);
+    lastCode = res.getResponseCode();
+    lastBody = res.getContentText();
+
+    if (lastCode === 200) {
+      return JSON.parse(lastBody).content[0].text;
+    }
+
+    if (retryableCodes.indexOf(lastCode) !== -1 && attempt < maxRetries) {
+      Logger.log(`Claude API ${lastCode} — ${attempt + 1}回目リトライ (${retryDelays[attempt] / 1000}秒後)`);
+      Utilities.sleep(retryDelays[attempt]);
+      continue;
+    }
+
+    break;
   }
-  const body = JSON.parse(res.getContentText());
-  return body.content[0].text;
+
+  throw new Error(`Claude APIエラー (${lastCode}): ${lastBody}`);
 }
 
 // 分析プロンプトの組み立て
