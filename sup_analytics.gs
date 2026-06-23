@@ -1493,6 +1493,133 @@ function fmtDate(d) {
 }
 
 // ============================================================
+// Step 3: Claude APIによる週次レポート自動生成
+// ============================================================
+
+// メイン：週次レポートを生成して記録＆通知
+function generateWeeklyReport() {
+  const snapshot = buildWeeklySnapshot();
+  const prompt   = buildAnalysisPrompt(snapshot);
+  const report   = callClaudeAPI(prompt);
+
+  writeWeeklyReport(snapshot, report);
+
+  // LINEにサマリー通知（postToLineはsup_reservation.gs側に定義）
+  try {
+    if (typeof postToLine === 'function') {
+      postToLine(`📊【SUP週次レポート】${snapshot.period.reportWeek}\n\n${report}`);
+    }
+  } catch (e) {
+    Logger.log('LINE通知スキップ: ' + e);
+  }
+
+  Logger.log(report);
+  return report;
+}
+
+// Claude API呼び出し
+function callClaudeAPI(prompt) {
+  const key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  if (!key) throw new Error('ANTHROPIC_API_KEY が未設定です（スクリプトプロパティに登録してください）');
+
+  const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+    },
+    payload: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 1800,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+    muteHttpExceptions: true,
+  });
+
+  const code = res.getResponseCode();
+  if (code !== 200) {
+    throw new Error(`Claude APIエラー (${code}): ${res.getContentText()}`);
+  }
+  const body = JSON.parse(res.getContentText());
+  return body.content[0].text;
+}
+
+// 分析プロンプトの組み立て
+function buildAnalysisPrompt(snapshot) {
+  return [
+    'あなたはSUP（スタンドアップパドルボード）体験事業の経営アナリストです。',
+    '以下の週次データを分析し、経営者向けの簡潔な日本語レポートを作成してください。',
+    '',
+    '# 事業概要',
+    '- 福島県の屋外SUP体験事業（裏磐梯）',
+    '- 営業期間：5〜10月のみ（冬季はオフシーズン）',
+    '- 予約経路：OTA（じゃらん／AJ／アソビュー、手数料16.5%）、自社HP予約satsuki（手数料3%）、直接予約（LINE／インスタ／その他、手数料0%）',
+    '- 「売上」は税込（お客様支払額）、「手取り」は手数料控除後',
+    '',
+    '# 今週時点のデータ（JSON）',
+    '```json',
+    JSON.stringify(snapshot, null, 2),
+    '```',
+    '',
+    '# 注意点',
+    '- 現在はシーズンのどの段階か（初期5-6月／最盛期7-8月／終盤9-10月）を考慮すること',
+    '- 達成率・前年同期比・チャネル別の動きから示唆を出すこと',
+    '- upcoming（今後の確定予約）も踏まえて先行きを評価すること',
+    '- シーズン初期は実績が少ないのは自然なので過度に悲観しないこと',
+    '',
+    '# 出力フォーマット（Markdown）',
+    '## 📈 現状サマリー',
+    '（3行以内で全体像）',
+    '',
+    '## 🔍 注目ポイント',
+    '（達成率・前年比・チャネル動向から2〜3点、数値を具体的に引用）',
+    '',
+    '## ✅ 今週の推奨アクション',
+    '（実行可能な具体策を優先順位つきで3つ。なぜ効くのかも一言添える）',
+  ].join('\n');
+}
+
+// 【週次レポート】シートに記録
+function writeWeeklyReport(snapshot, reportText) {
+  const ss = getAnalyticsSS();
+  let sheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.WEEKLY_REPORT);
+  if (!sheet) sheet = ss.insertSheet(ANALYTICS_CONFIG.SHEETS.WEEKLY_REPORT);
+
+  if (sheet.getRange(1, 1).getValue() !== '生成日時') {
+    sheet.getRange(1, 1, 1, 5).setValues([['生成日時', '対象週', '年累計達成率', 'レポート', 'スナップショットJSON']])
+      .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.setColumnWidth(4, 600);
+  }
+
+  const ytdRate = snapshot.yearToDate.ytdAchievement.revenue;
+  sheet.insertRowAfter(1);
+  sheet.getRange(2, 1, 1, 5).setValues([[
+    new Date(),
+    snapshot.period.reportWeek,
+    ytdRate !== null ? `${Math.round(ytdRate * 100)}%` : '-',
+    reportText,
+    JSON.stringify(snapshot),
+  ]]);
+  sheet.getRange(2, 4).setWrap(true).setVerticalAlignment('top');
+}
+
+// 週次トリガーを設定（毎週月曜 8:00）
+function setupWeeklyReportTrigger() {
+  // 既存の同名トリガーを削除
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'generateWeeklyReport') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('generateWeeklyReport')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(8)
+    .create();
+  Logger.log('週次レポートトリガー設定完了（毎週月曜8:00）');
+}
+
+// ============================================================
 // ユーティリティ
 // ============================================================
 
