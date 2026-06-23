@@ -10,8 +10,8 @@ const CONFIG = {
   PROCESSED_LABEL:    'SUP予約/処理済',
 
   // 午前・午後の上限人数（超えそうな場合に警告）
-  MORNING_LIMIT:   12,  // 午前枠（～12:00）の上限
-  AFTERNOON_LIMIT: 12,  // 午後枠（12:00～）の上限
+  MORNING_LIMIT:   8,  // 午前枠（～12:00）の上限
+  AFTERNOON_LIMIT: 8,  // 午後枠（12:00～）の上限
 
   SEARCH_QUERY: 'in:anywhere (SUP OR サップ) ('
     + 'from:reservation@activityboard.jp'
