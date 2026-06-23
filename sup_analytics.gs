@@ -329,47 +329,61 @@ function parseAsoview_CSV(ss) {
 }
 
 // ============================================================
-// CSVパーサー：直接（LINE/インスタ等）
+// CSVパーサー：直接（その他/ライン/インスタ/GO OUT/ベルトラ等）
+// ※【直接_CSV】は専用ヘッダー付きの手入力フォーマット
+//   列: ステータス, 担当者, 媒体, 参加年, 参加月, 参加日, 時間,
+//       予約年, 予約月, 予約日, 代表者名(姓名), 代表者名(セイメイ),
+//       合計人数, 大人人数, 子供人数, ペット数, 料金, 都道府県, 住所, 年齢, 電話番号
 // ============================================================
 function parseDirect_CSV(ss) {
   const sheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.DIRECT_CSV);
   if (!sheet) return [];
 
-  const headerRow = findHeaderRow(sheet, '参加');
+  const headerRow = findHeaderRow(sheet, 'ステータス');
   if (!headerRow) return [];
 
-  const data    = sheet.getRange(headerRow + 1, 1, sheet.getLastRow() - headerRow, sheet.getLastColumn()).getValues();
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= headerRow) return [];
+
+  const data    = sheet.getRange(headerRow + 1, 1, lastRow - headerRow, sheet.getLastColumn()).getValues();
   const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn()).getValues()[0];
   const col     = buildColMap(headers);
 
   return data
-    .filter(row => row[col['代表者名(姓名)']] && String(row[col['代表者名(姓名)']]).trim())
+    .filter(row => {
+      // 名前・料金・参加年のいずれかがあれば有効行とみなす（団体予約で名前空欄でも拾う）
+      const name = String(row[col['代表者名(姓名)']] || '').trim();
+      const fee  = row[col['料金']];
+      const y    = row[col['参加年']];
+      return name || (fee !== '' && fee != null) || (y !== '' && y != null);
+    })
     .map((row, idx) => {
       const guestName  = String(row[col['代表者名(姓名)']] || '').trim();
-      const channel    = String(row[col['媒体']] || '直接').trim();
-      const actDate    = buildDateFromCols(row[col['年']], row[col['月']], row[col['日']]);
+      const channel    = String(row[col['媒体']] || '直接').trim() || '直接';
+      const actDate    = buildDateFromCols(row[col['参加年']], row[col['参加月']], row[col['参加日']]);
       const actTime    = formatTime(row[col['時間']]);
-      const bookYear   = row[col['年_予約']] || row[headers.lastIndexOf('年') + 1];
-      const bookDate   = toDateOnly(row[col['予約日']]) || actDate;
+      const bookDate   = buildDateFromCols(row[col['予約年']], row[col['予約月']], row[col['予約日']]) || actDate;
 
       const paxTotal   = toInt(row[col['合計人数']]);
       const paxAdult   = toInt(row[col['大人人数']]);
-      const paxChild   = toInt(row[col['子人人数']]) || toInt(row[col['子供人数']]);
-      const paxPet     = toInt(row[col['ペット']]);
+      const paxChild   = toInt(row[col['子供人数']]);
+      const paxPet     = toInt(row[col['ペット数']]);
       const prefecture = String(row[col['都道府県']] || '').trim();
 
-      const uniqueKey = `direct_${guestName}_${actDate ? actDate.toISOString().slice(0, 10) : idx}`;
+      // 行番号(idx)を含めて一意化：同名・同日・同媒体の複数予約も別レコードとして保持
+      const dateKey   = actDate ? actDate.toISOString().slice(0, 10) : 'nodate';
+      const uniqueKey = `direct_${channel}_${guestName || 'noname'}_${dateKey}_${idx}`;
 
       return {
         unifiedId:       uniqueKey,
-        channel:         channel || '直接',
+        channel,
         bookingNo:       '',
         guestName,
-        guestKana:       String(row[col['代表者名\n(セイメイ)']] || row[col['代表者名(セイメイ)']] || '').trim(),
+        guestKana:       String(row[col['代表者名(セイメイ)']] || '').trim(),
         activityDate:    actDate,
         activityTime:    actTime,
         bookingDate:     bookDate,
-        status:          normalizeStatus(String(row[col['参加']] || ''), '直接'),
+        status:          normalizeStatus(String(row[col['ステータス']] || ''), '直接'),
         paxTotal:        paxTotal || (paxAdult + paxChild + paxPet) || 1,
         paxAdult:        paxAdult || 0,
         paxChild:        paxChild || 0,
@@ -760,6 +774,15 @@ function updateMonthlyDashboard(ss) {
     const pricePerPax   = m.pax      > 0 ? Math.round(m.gross / m.pax)     : '';
     const commRate      = m.gross    > 0 ? (m.commissionAmt / m.gross)      : '';
 
+    // 直接・その他系（主要OTA以外すべて：直接/ライン/インスタ/その他/GO OUT/ベルトラ等）
+    const MAJOR = ['AJ', 'じゃらん', 'アソビュー', 'Web予約'];
+    let directBookings = 0, directGross = 0;
+    Object.entries(ch).forEach(([name, v]) => {
+      if (MAJOR.includes(name)) return;
+      directBookings += v.bookings;
+      directGross    += v.gross;
+    });
+
     rows.push([
       ym,
       m.bookings, m.pax, m.gross, m.net,
@@ -773,8 +796,7 @@ function updateMonthlyDashboard(ss) {
       (ch['じゃらん']   || {}).bookings || 0, (ch['じゃらん']   || {}).gross || 0,
       (ch['アソビュー'] || {}).bookings || 0, (ch['アソビュー'] || {}).gross || 0,
       (ch['Web予約']    || {}).bookings || 0, (ch['Web予約']    || {}).gross || 0,
-      ((ch['直接'] || {}).bookings || 0) + ((ch['ライン'] || {}).bookings || 0) + ((ch['インスタ'] || {}).bookings || 0),
-      ((ch['直接'] || {}).gross    || 0) + ((ch['ライン'] || {}).gross    || 0) + ((ch['インスタ'] || {}).gross    || 0),
+      directBookings, directGross,
     ]);
   });
 
@@ -1214,12 +1236,11 @@ function setupAnalyticsSheets() {
     dbSheet.setFrozenColumns(3);
   }
 
-  // CSVタブの案内文
+  // CSVタブの案内文（OTAは管理画面DLのCSVを貼る）
   [
     [ANALYTICS_CONFIG.SHEETS.AJ_CSV,      'アクティビティジャパン管理画面からダウンロードしたCSVを3行目以降に貼り付けてください'],
     [ANALYTICS_CONFIG.SHEETS.JALAN_CSV,   'じゃらんnet管理画面からダウンロードしたCSVを3行目以降に貼り付けてください'],
     [ANALYTICS_CONFIG.SHEETS.ASOVIEW_CSV, 'アソビュー/ウラカタ管理画面からダウンロードしたCSVを3行目以降に貼り付けてください'],
-    [ANALYTICS_CONFIG.SHEETS.DIRECT_CSV,  'LINE/インスタ等の直接予約を手入力してください（書式は既存の直接入力タブに合わせてください）'],
   ].forEach(([sheetName, note]) => {
     const s = ss.getSheetByName(sheetName);
     if (s && !s.getRange(1, 1).getValue()) {
@@ -1227,10 +1248,70 @@ function setupAnalyticsSheets() {
     }
   });
 
+  // 【直接_CSV】はヘッダー付き・入力規則ありの手入力フォーマットを整備
+  setupDirectInputSheet();
+
   // 過去目標値を自動シード
   seedHistoricalTargets();
 
   Logger.log('セットアップ完了。SPREADSHEET_IDを設定してnormalizeAllCSV()を実行してください。');
+}
+
+// ============================================================
+// 【直接_CSV】タブを手入力フォーマット（ヘッダー＋入力規則）に整備
+// ============================================================
+const DIRECT_HEADERS = [
+  'ステータス', '担当者', '媒体',
+  '参加年', '参加月', '参加日', '時間',
+  '予約年', '予約月', '予約日',
+  '代表者名(姓名)', '代表者名(セイメイ)',
+  '合計人数', '大人人数', '子供人数', 'ペット数',
+  '料金', '都道府県', '住所', '年齢', '電話番号',
+];
+
+function setupDirectInputSheet() {
+  const ss = getAnalyticsSS();
+  let sheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.DIRECT_CSV);
+  if (!sheet) sheet = ss.insertSheet(ANALYTICS_CONFIG.SHEETS.DIRECT_CSV);
+
+  const first = String(sheet.getRange(1, 1).getValue()).trim();
+
+  // 1行目が既にヘッダーでなければヘッダーを設置
+  if (first !== 'ステータス') {
+    // 既存にデータ・案内文がある場合は上に1行挿入して保護
+    if (first !== '') sheet.insertRowBefore(1);
+    sheet.getRange(1, 1, 1, DIRECT_HEADERS.length).setValues([DIRECT_HEADERS])
+      .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
+  }
+  sheet.setFrozenRows(1);
+
+  // 入力規則（プルダウン）を設定
+  const maxRows = Math.max(sheet.getMaxRows() - 1, 500);
+
+  const statusRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['参加済', '予約確定', 'キャンセル'], true)
+    .setAllowInvalid(false).build();
+  sheet.getRange(2, 1, maxRows, 1).setDataValidation(statusRule); // A列 ステータス
+
+  const staffRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['石山', '小川', '熊田'], true)
+    .setAllowInvalid(true).build();
+  sheet.getRange(2, 2, maxRows, 1).setDataValidation(staffRule);  // B列 担当者
+
+  const mediaRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['その他', 'ライン', 'インスタ', 'GO OUT', 'ベルトラ', '直接'], true)
+    .setAllowInvalid(true).build();
+  sheet.getRange(2, 3, maxRows, 1).setDataValidation(mediaRule);  // C列 媒体
+
+  // 数値列のチェック（参加年〜料金、年齢）
+  const numberRule = SpreadsheetApp.newDataValidation()
+    .requireNumberGreaterThanOrEqualTo(0)
+    .setAllowInvalid(true).build();
+  [4, 5, 6, 8, 9, 10, 13, 14, 15, 16, 17, 20].forEach(c =>
+    sheet.getRange(2, c, maxRows, 1).setDataValidation(numberRule)
+  );
+
+  Logger.log('【直接_CSV】整備完了（ヘッダー＋入力規則）');
 }
 
 // ============================================================
@@ -1612,7 +1693,7 @@ function debugChannels() {
     [ANALYTICS_CONFIG.SHEETS.AJ_CSV,      '予約番号'],
     [ANALYTICS_CONFIG.SHEETS.JALAN_CSV,   '予約番号'],
     [ANALYTICS_CONFIG.SHEETS.ASOVIEW_CSV, '予約グループID'],
-    [ANALYTICS_CONFIG.SHEETS.DIRECT_CSV,  '参加'],
+    [ANALYTICS_CONFIG.SHEETS.DIRECT_CSV,  'ステータス'],
   ].forEach(([name, keyword]) => {
     const s = ss.getSheetByName(name);
     if (!s) { Logger.log(`${name}: シートなし`); return; }
