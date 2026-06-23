@@ -994,3 +994,44 @@ function onEdit_Analytics(e) {
   // 少し間隔を空けてから処理（大量貼付完了を待つ）
   normalizeAllCSV();
 }
+
+// ============================================================
+// ダッシュボードのみ更新（目標値変更後に手動実行）
+// ============================================================
+function updateDashboardOnly() {
+  const ss = getAnalyticsSS();
+  updateMonthlyDashboard(ss);
+  updateCustomerAnalysis(ss);
+  Logger.log('ダッシュボード更新完了');
+}
+
+// ============================================================
+// デバッグ：目標値の読み込み確認
+// ============================================================
+function debugTargets() {
+  const ss       = getAnalyticsSS();
+  const tgtSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.TARGET);
+  if (!tgtSheet) {
+    Logger.log('【目標】シートが見つかりません');
+    return;
+  }
+  const data    = tgtSheet.getDataRange().getValues();
+  Logger.log('ヘッダー行: ' + JSON.stringify(data[0]));
+  Logger.log('データ行数: ' + (data.length - 1));
+  const targets = loadTargets(tgtSheet);
+  Logger.log('読み込んだ目標: ' + JSON.stringify(targets));
+
+  // 統合DBの年月も確認
+  const dbSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.UNIFIED_DB);
+  const dbData  = dbSheet.getDataRange().getValues();
+  const yms     = new Set();
+  for (let i = 1; i < dbData.length; i++) {
+    const dateVal = dbData[i][DB.ACTIVITY_DATE - 1];
+    if (!dateVal) continue;
+    const d = dateVal instanceof Date ? dateVal : new Date(dateVal);
+    if (!isNaN(d.getTime())) {
+      yms.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    }
+  }
+  Logger.log('統合DBの年月一覧: ' + JSON.stringify([...yms].sort()));
+}
