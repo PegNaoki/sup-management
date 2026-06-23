@@ -43,15 +43,20 @@ const COLUMNS = {
 };
 
 // ============================================================
-// メイン処理：メール取込（トリガーで定期実行）
+// メイン処理：メール取込（バッチ処理・1回20件ずつ）
 // ============================================================
 function importReservationEmails() {
-  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  const sheet = getOrCreateSheet(ss);
-  const done  = getProcessedMessageIds(sheet);
-  const label = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
+  const props   = PropertiesService.getScriptProperties();
+  const ss      = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet   = getOrCreateSheet(ss);
+  const done    = getProcessedMessageIds(sheet);
+  const label   = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
 
-  const threads = GmailApp.search(CONFIG.SEARCH_QUERY, 0, 500);
+  // 前回の続きオフセットを取得
+  const offset   = parseInt(props.getProperty('IMPORT_OFFSET') || '0', 10);
+  const BATCH    = 20;
+  const threads  = GmailApp.search(CONFIG.SEARCH_QUERY, offset, BATCH);
+
   let newCount = 0;
 
   threads.forEach(thread => {
@@ -68,12 +73,23 @@ function importReservationEmails() {
     thread.addLabel(label);
   });
 
-  if (newCount > 0) {
-    SpreadsheetApp.flush();
-    Logger.log(`${newCount}件の予約メールを取込みました`);
+  if (newCount > 0) SpreadsheetApp.flush();
+
+  if (threads.length === BATCH) {
+    // まだ続きがある → 次回実行用にオフセットを保存
+    props.setProperty('IMPORT_OFFSET', String(offset + BATCH));
+    Logger.log(`${newCount}件取込。次回は${offset + BATCH}件目から再開します`);
   } else {
-    Logger.log('新しい予約メールはありませんでした');
+    // 全件処理完了 → オフセットをリセット
+    props.deleteProperty('IMPORT_OFFSET');
+    Logger.log(`取込完了（今回${newCount}件）。次回は最新メールのみチェックします`);
   }
+}
+
+// 過去メールを一括取込（手動実行用）
+function importAllHistoricalEmails() {
+  PropertiesService.getScriptProperties().deleteProperty('IMPORT_OFFSET');
+  importReservationEmails();
 }
 
 // ============================================================
