@@ -12,6 +12,7 @@ const ANALYTICS_CONFIG = {
     ASOVIEW_CSV:  '【アソビュー_CSV】',
     DIRECT_CSV:   '【直接_CSV】',
     UNIFIED_DB:   '【統合DB】',
+    ANNUAL_DASH:  '【年間ダッシュボード】',
     MONTHLY_DASH: '【月次ダッシュボード】',
     DAILY_DASH:   '【日次ダッシュボード】',
     CUSTOMER:     '【顧客分析】',
@@ -19,10 +20,11 @@ const ANALYTICS_CONFIG = {
 
   // チャネル別手数料率（初期値 / 【目標】タブで上書き可）
   COMMISSION_RATES: {
-    'AJ':        0.15,
-    'じゃらん':   0.15,
-    'アソビュー':  0.15,
-    'Web予約':    0.05,
+    'AJ':        0.165,
+    'じゃらん':   0.165,
+    'アソビュー':  0.165,
+    'satsuki':    0.03,
+    'Web予約':    0.03,
     '直接':       0.00,
     'ライン':     0.00,
     'インスタ':   0.00,
@@ -114,6 +116,7 @@ function normalizeAllCSV() {
   SpreadsheetApp.flush();
   Logger.log(`統合DB更新：追加${addCount}件、スキップ${skipCount}件`);
 
+  updateAnnualDashboard(ss);
   updateMonthlyDashboard(ss);
   updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
@@ -144,6 +147,7 @@ function rebuildAll() {
 
   SpreadsheetApp.flush();
   Logger.log(`全件再構築：${records.length}件`);
+  updateAnnualDashboard(ss);
   updateMonthlyDashboard(ss);
   updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
@@ -433,6 +437,260 @@ function appendToUnifiedDB(sheet, r) {
     r.surveyRepeat    || '',
     new Date(),
   ]);
+}
+
+// ============================================================
+// 年間ダッシュボード更新
+// ============================================================
+function updateAnnualDashboard(ss) {
+  const dbSheet   = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.UNIFIED_DB);
+  const dashSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.ANNUAL_DASH);
+  const tgtSheet  = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.TARGET);
+  if (!dashSheet) return;
+
+  const dbData  = dbSheet.getDataRange().getValues();
+  const targets = loadTargets(tgtSheet);
+
+  // 年別・月別集計
+  const annual  = {};  // { year: { bookings, pax, gross, commission, net } }
+  const monthly = {};  // { 'YYYY-MM': { bookings, pax, gross, commission, net } }
+
+  for (let i = 1; i < dbData.length; i++) {
+    const row    = dbData[i];
+    const status = row[DB.STATUS - 1];
+    if (status === 'cancelled') continue;
+
+    const dateVal = row[DB.ACTIVITY_DATE - 1];
+    if (!dateVal) continue;
+    const d = dateVal instanceof Date ? dateVal : new Date(dateVal);
+    if (isNaN(d.getTime())) continue;
+
+    const year = d.getFullYear();
+    const ym   = `${year}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+
+    const gross = Number(row[DB.REVENUE_GROSS - 1])    || 0;
+    const com   = Number(row[DB.COMMISSION_AMT - 1])   || 0;
+    const net   = Number(row[DB.REVENUE_NET - 1])      || 0;
+    const pax   = Number(row[DB.PAX_TOTAL - 1])        || 0;
+
+    if (!annual[year]) annual[year] = { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
+    annual[year].bookings++;
+    annual[year].pax        += pax;
+    annual[year].gross      += gross;
+    annual[year].commission += com;
+    annual[year].net        += net;
+
+    if (!monthly[ym]) monthly[ym] = { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
+    monthly[ym].bookings++;
+    monthly[ym].pax        += pax;
+    monthly[ym].gross      += gross;
+    monthly[ym].commission += com;
+    monthly[ym].net        += net;
+  }
+
+  // 年間目標（月別目標を合算）
+  const annualTargets = {};
+  Object.entries(targets).forEach(([ym, t]) => {
+    const year = ym.slice(0, 4);
+    if (!annualTargets[year]) annualTargets[year] = { bookings: 0, pax: 0, revenue: 0 };
+    annualTargets[year].bookings += t.bookings || 0;
+    annualTargets[year].pax      += t.pax      || 0;
+    annualTargets[year].revenue  += t.revenue  || 0;
+  });
+
+  dashSheet.clearContents();
+  dashSheet.getCharts().forEach(c => dashSheet.removeChart(c));
+  let row = 1;
+
+  // ── セクション1：年度別KPI一覧 ──────────────────────────
+  const secHeader = (title) => {
+    dashSheet.getRange(row, 1, 1, 10).merge()
+      .setValue(title).setFontWeight('bold').setFontSize(12)
+      .setBackground('#434343').setFontColor('#ffffff');
+    row++;
+  };
+
+  const writeHeader = (cols, bg) => {
+    dashSheet.getRange(row, 1, 1, cols.length).setValues([cols])
+      .setBackground(bg || '#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
+    row++;
+  };
+
+  const sortedYears = Object.keys(annual).sort();
+  const currentYear = String(new Date().getFullYear());
+
+  secHeader('■ 年度別KPI');
+  const kpiLabels = [
+    'KPI', ...sortedYears.map(y => y + '年 実績'),
+    currentYear + '年 目標', currentYear + '年 達成率'
+  ];
+  writeHeader(kpiLabels, '#4a86e8');
+
+  const kpiDef = [
+    { label: '① 予約数（組）',            fmt: '#,##0',    get: a => a.bookings },
+    { label: '② 1予約あたり人数（人）',    fmt: '0.00',     get: a => a.bookings > 0 ? a.pax / a.bookings : 0 },
+    { label: '③ 1予約あたり売上（円）',    fmt: '¥#,##0',  get: a => a.bookings > 0 ? Math.round(a.net / a.bookings) : 0 },
+    { label: '④ 1人あたり単価（円）',      fmt: '¥#,##0',  get: a => a.pax > 0 ? Math.round(a.net / a.pax) : 0 },
+    { label: '⑤ 売上（円）',              fmt: '¥#,##0',  get: a => a.net },
+    { label: '⑥ 平均手数料率（％）',       fmt: '0.00%',   get: a => a.gross > 0 ? a.commission / a.gross : 0 },
+    { label: '⑦ 粗利率（％）',            fmt: '0.00%',   get: a => a.gross > 0 ? a.net / a.gross : 0 },
+  ];
+
+  const tgtCurr = annualTargets[currentYear] || {};
+  const actCurr = annual[currentYear] || { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
+
+  kpiDef.forEach((kpi, ki) => {
+    const vals = sortedYears.map(y => kpi.get(annual[y]));
+    let tgtVal = '';
+    let achRate = '';
+    if (ki === 0) { tgtVal = tgtCurr.bookings || ''; }
+    else if (ki === 4) { tgtVal = tgtCurr.revenue  || ''; }
+
+    if (tgtVal && tgtVal > 0) {
+      const actVal = kpi.get(actCurr);
+      achRate = actVal / tgtVal;
+    }
+
+    const rowVals = [kpi.label, ...vals, tgtVal, achRate];
+    const r = dashSheet.getRange(row, 1, 1, rowVals.length);
+    r.setValues([rowVals]);
+
+    // 各年の数値に書式適用
+    sortedYears.forEach((_, ci) => {
+      dashSheet.getRange(row, ci + 2).setNumberFormat(kpi.fmt);
+    });
+    if (tgtVal !== '') dashSheet.getRange(row, sortedYears.length + 2).setNumberFormat(kpi.fmt);
+    if (achRate !== '') {
+      const achCell = dashSheet.getRange(row, sortedYears.length + 3);
+      achCell.setNumberFormat('0.0%');
+      if (typeof achRate === 'number') {
+        if (achRate >= 1.0)    achCell.setBackground('#b6d7a8');
+        else if (achRate < 0.8) achCell.setBackground('#f4cccc');
+        else                    achCell.setBackground('#fff2cc');
+      }
+    }
+    // 交互行色
+    if (ki % 2 === 1) dashSheet.getRange(row, 1, 1, rowVals.length).setBackground('#f8f9fa');
+    row++;
+  });
+  row += 2;
+
+  // ── セクション2：月別推移（当年） ────────────────────────
+  secHeader(`■ ${currentYear}年 月別KPI推移`);
+
+  const monthHeaders = ['月', '予約数', '人数', '売上(net)', '1予約あたり人数', '1人あたり単価', '平均手数料率', '粗利率', '目標_予約数', '目標_人数', '目標_売上', '達成率_売上'];
+  writeHeader(monthHeaders, '#6aa84f');
+
+  const monthlyChartStartRow = row;
+  for (let m = 1; m <= 12; m++) {
+    const ym  = `${currentYear}-${String(m).padStart(2, '0')}`;
+    const md  = monthly[ym] || { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
+    const tgt = targets[ym] || {};
+
+    const pap  = md.bookings > 0 ? (md.pax  / md.bookings).toFixed(2) : '';
+    const upp  = md.pax      > 0 ? Math.round(md.net / md.pax)        : '';
+    const comR = md.gross    > 0 ? md.commission / md.gross            : '';
+    const grR  = md.gross    > 0 ? md.net / md.gross                  : '';
+    const achR = (tgt.revenue && tgt.revenue > 0) ? md.net / tgt.revenue : '';
+
+    const rowVals = [
+      `${m}月`,
+      md.bookings || '', md.pax || '', md.net || '',
+      pap, upp, comR, grR,
+      tgt.bookings || '', tgt.pax || '', tgt.revenue || '', achR,
+    ];
+    dashSheet.getRange(row, 1, 1, rowVals.length).setValues([rowVals]);
+
+    // 書式
+    dashSheet.getRange(row, 4).setNumberFormat('#,##0');
+    dashSheet.getRange(row, 6).setNumberFormat('#,##0');
+    dashSheet.getRange(row, 11).setNumberFormat('#,##0');
+    dashSheet.getRange(row, 7).setNumberFormat('0.0%');
+    dashSheet.getRange(row, 8).setNumberFormat('0.0%');
+    if (achR !== '') {
+      const achCell = dashSheet.getRange(row, 12);
+      achCell.setNumberFormat('0.0%');
+      if (typeof achR === 'number') {
+        if (achR >= 1.0)    achCell.setBackground('#b6d7a8');
+        else if (achR < 0.8) achCell.setBackground('#f4cccc');
+        else                  achCell.setBackground('#fff2cc');
+      }
+    }
+    row++;
+  }
+
+  // 合計行
+  const annCurr = annual[currentYear] || { bookings: 0, pax: 0, gross: 0, commission: 0, net: 0 };
+  const tgtCurrTotal = annualTargets[currentYear] || {};
+  const totalAchR = (tgtCurrTotal.revenue > 0) ? annCurr.net / tgtCurrTotal.revenue : '';
+  const totalRow = [
+    '合計/平均',
+    annCurr.bookings || '', annCurr.pax || '', annCurr.net || '',
+    annCurr.bookings > 0 ? (annCurr.pax / annCurr.bookings).toFixed(2) : '',
+    annCurr.pax > 0 ? Math.round(annCurr.net / annCurr.pax) : '',
+    annCurr.gross > 0 ? annCurr.commission / annCurr.gross : '',
+    annCurr.gross > 0 ? annCurr.net / annCurr.gross : '',
+    tgtCurrTotal.bookings || '', tgtCurrTotal.pax || '', tgtCurrTotal.revenue || '',
+    totalAchR,
+  ];
+  dashSheet.getRange(row, 1, 1, totalRow.length).setValues([totalRow])
+    .setFontWeight('bold').setBackground('#e8f0fe');
+  dashSheet.getRange(row, 4).setNumberFormat('#,##0');
+  dashSheet.getRange(row, 6).setNumberFormat('#,##0');
+  dashSheet.getRange(row, 11).setNumberFormat('#,##0');
+  dashSheet.getRange(row, 7).setNumberFormat('0.0%');
+  dashSheet.getRange(row, 8).setNumberFormat('0.0%');
+  if (totalAchR !== '') dashSheet.getRange(row, 12).setNumberFormat('0.0%');
+  row += 2;
+
+  // ── セクション3：年度別推移グラフ ────────────────────────
+  // 売上推移グラフ用データを右側の列（N列以降）に書き出し
+  const chartCol = 14;
+  const chartStartRow = row;
+  secHeader('■ 年度別 売上・予約数推移（グラフ用）');
+  dashSheet.getRange(row, chartCol, 1, 3)
+    .setValues([['年', '売上(net)', '予約数']]).setFontWeight('bold').setBackground('#4a86e8').setFontColor('#ffffff');
+  row++;
+  const chartDataStart = row;
+  sortedYears.forEach(y => {
+    const a = annual[y];
+    dashSheet.getRange(row, chartCol, 1, 3).setValues([[y + '年', a.net, a.bookings]]);
+    dashSheet.getRange(row, chartCol + 1).setNumberFormat('#,##0');
+    row++;
+  });
+  const chartDataEnd = row - 1;
+
+  SpreadsheetApp.flush();
+
+  // 年別売上グラフ
+  if (chartDataEnd >= chartDataStart) {
+    try {
+      const chart = dashSheet.newChart()
+        .setChartType(Charts.ChartType.COLUMN)
+        .addRange(dashSheet.getRange(chartDataStart - 1, chartCol, chartDataEnd - chartDataStart + 2, 2))
+        .setOption('title', '年度別 売上推移')
+        .setOption('width', 480).setOption('height', 280)
+        .setPosition(chartStartRow, 1, 0, 0).build();
+      dashSheet.insertChart(chart);
+    } catch(e) { Logger.log('年次売上グラフエラー: ' + e); }
+
+    // 月別売上・目標グラフ（当年）
+    try {
+      const chart2 = dashSheet.newChart()
+        .setChartType(Charts.ChartType.LINE)
+        .addRange(dashSheet.getRange(monthlyChartStartRow, 1, 12, 1))
+        .addRange(dashSheet.getRange(monthlyChartStartRow, 4, 12, 1))
+        .addRange(dashSheet.getRange(monthlyChartStartRow, 11, 12, 1))
+        .setOption('title', `${currentYear}年 月別売上 vs 目標`)
+        .setOption('series', { 0: { color: '#4285f4' }, 1: { color: '#ea4335', lineDashType: 'dash' } })
+        .setOption('width', 480).setOption('height', 280)
+        .setPosition(monthlyChartStartRow, 14, 0, 0).build();
+      dashSheet.insertChart(chart2);
+    } catch(e) { Logger.log('月次売上グラフエラー: ' + e); }
+  }
+
+  dashSheet.setFrozenRows(0);
+  Logger.log('年間ダッシュボード更新完了');
 }
 
 // ============================================================
@@ -911,7 +1169,7 @@ function setupAnalyticsSheets() {
   if (tgtSheet.getRange(1, 1).getValue() !== '年月') {
     const tgtHeaders = [
       '年月', '目標_予約数', '目標_人数', '目標_売上',
-      '手数料率_AJ', '手数料率_じゃらん', '手数料率_アソビュー', '手数料率_Web予約',
+      '手数料率_AJ', '手数料率_じゃらん', '手数料率_アソビュー', '手数料率_satsuki', '手数料率_Web予約',
       '手数料率_直接', '手数料率_ライン', '手数料率_インスタ',
     ];
     tgtSheet.getRange(1, 1, 1, tgtHeaders.length).setValues([tgtHeaders])
@@ -924,6 +1182,7 @@ function setupAnalyticsSheets() {
        ANALYTICS_CONFIG.COMMISSION_RATES['AJ'],
        ANALYTICS_CONFIG.COMMISSION_RATES['じゃらん'],
        ANALYTICS_CONFIG.COMMISSION_RATES['アソビュー'],
+       ANALYTICS_CONFIG.COMMISSION_RATES['satsuki'],
        ANALYTICS_CONFIG.COMMISSION_RATES['Web予約'],
        ANALYTICS_CONFIG.COMMISSION_RATES['直接'],
        ANALYTICS_CONFIG.COMMISSION_RATES['ライン'],
@@ -1002,7 +1261,7 @@ function loadCommissionRates(ss) {
   const rates   = { ...ANALYTICS_CONFIG.COMMISSION_RATES };
 
   // 手数料率列が設定されていれば上書き（最初の非空行を使用）
-  const channelKeys = ['AJ', 'じゃらん', 'アソビュー', 'Web予約', '直接', 'ライン', 'インスタ'];
+  const channelKeys = ['AJ', 'じゃらん', 'アソビュー', 'satsuki', 'Web予約', '直接', 'ライン', 'インスタ'];
   channelKeys.forEach(ch => {
     const colKey = `手数料率_${ch}`;
     if (col[colKey] !== undefined) {
@@ -1198,6 +1457,7 @@ function onEdit_Analytics(e) {
 // ============================================================
 function updateDashboardOnly() {
   const ss = getAnalyticsSS();
+  updateAnnualDashboard(ss);
   updateMonthlyDashboard(ss);
   updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
