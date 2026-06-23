@@ -281,14 +281,33 @@ function detectBookingType(subject) {
 
 function parseDateTime(dateStr, timeStr) {
   try {
-    const normalized = String(dateStr)
-      .replace(/年/, '/').replace(/月/, '/').replace(/日/, '').replace(/-/g, '/').trim();
-    const timeNorm = String(timeStr).replace(/時/, ':').replace(/分/, '').trim() || '09:00';
-    const parts = normalized.split('/');
-    if (parts.length !== 3) return null;
-    const [y, mo, d] = parts.map(Number);
-    const [h, mi]    = timeNorm.split(':').map(Number);
-    const date = new Date(y, mo - 1, d, h, mi || 0);
+    let year, month, day, hour = 9, minute = 0;
+
+    // 日付がDateオブジェクトの場合（スプレッドシートから読み込んだ場合）
+    if (dateStr instanceof Date) {
+      year  = dateStr.getFullYear();
+      month = dateStr.getMonth() + 1;
+      day   = dateStr.getDate();
+    } else {
+      const normalized = String(dateStr)
+        .replace(/年/, '/').replace(/月/, '/').replace(/日/, '').replace(/-/g, '/').trim();
+      const parts = normalized.split('/');
+      if (parts.length !== 3) return null;
+      [year, month, day] = parts.map(Number);
+    }
+
+    // 時刻がDateオブジェクトの場合
+    if (timeStr instanceof Date) {
+      hour   = timeStr.getHours();
+      minute = timeStr.getMinutes();
+    } else {
+      const timeNorm = String(timeStr).replace(/時/, ':').replace(/分/, '').trim();
+      if (timeNorm.includes(':')) {
+        [hour, minute] = timeNorm.split(':').map(Number);
+      }
+    }
+
+    const date = new Date(year, month - 1, day, hour, minute);
     return isNaN(date.getTime()) ? null : date;
   } catch (e) { return null; }
 }
