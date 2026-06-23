@@ -8,7 +8,7 @@ const CONFIG = {
   SPREADSHEET_ID: 'YOUR_SPREADSHEET_ID',   // スプレッドシートID（URLの /d/XXXX/edit の部分）
   SHEET_NAME: '予約一覧',
   CALENDAR_ID: 'YOUR_CALENDAR_ID',          // カレンダーID（カレンダー設定の「カレンダーID」）
-  SEARCH_QUERY: 'subject:(じゃらんnet遊び・体験予約) OR subject:(アクティビティジャパン) OR subject:(アソビュー！)',
+  SEARCH_QUERY: 'in:anywhere (subject:じゃらんnet遊び OR subject:アクティビティジャパン OR subject:アソビュー)',
   PROCESSED_LABEL: 'SUP予約/処理済',
   EVENT_DURATION_HOURS: 2,                  // カレンダーイベントの所要時間（時間）
 };
@@ -55,7 +55,7 @@ function importReservationEmails() {
   // 処理済みラベルを取得または作成
   const label = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
 
-  const threads = GmailApp.search(CONFIG.SEARCH_QUERY, 0, 50);
+  const threads = GmailApp.search(CONFIG.SEARCH_QUERY, 0, 500);
 
   let newCount = 0;
   threads.forEach(thread => {
