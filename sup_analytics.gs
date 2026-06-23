@@ -682,7 +682,6 @@ function updateAnnualDashboard(ss) {
         .addRange(dashSheet.getRange(monthlyChartStartRow, 4, 12, 1))
         .addRange(dashSheet.getRange(monthlyChartStartRow, 11, 12, 1))
         .setOption('title', `${currentYear}年 月別売上 vs 目標`)
-        .setOption('series', { 0: { color: '#4285f4' }, 1: { color: '#ea4335', lineDashType: 'dash' } })
         .setOption('width', 480).setOption('height', 280)
         .setPosition(monthlyChartStartRow, 14, 0, 0).build();
       dashSheet.insertChart(chart2);
