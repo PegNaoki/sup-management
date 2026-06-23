@@ -1576,6 +1576,79 @@ function seedHistoricalTargets() {
 }
 
 // ============================================================
+// デバッグ：チャネル別の取込状況を確認
+// ============================================================
+function debugChannels() {
+  const ss      = getAnalyticsSS();
+  const dbSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.UNIFIED_DB);
+  const dbData  = dbSheet.getDataRange().getValues();
+
+  const stats = {};
+  for (let i = 1; i < dbData.length; i++) {
+    const row    = dbData[i];
+    const status = row[DB.STATUS - 1];
+    const ch     = row[DB.CHANNEL - 1] || '(空)';
+    const gross  = Number(row[DB.REVENUE_GROSS - 1]) || 0;
+    if (!stats[ch]) stats[ch] = { all: 0, allGross: 0, active: 0, activeGross: 0 };
+    stats[ch].all++;
+    stats[ch].allGross += gross;
+    if (status !== 'cancelled') {
+      stats[ch].active++;
+      stats[ch].activeGross += gross;
+    }
+  }
+
+  Logger.log('===== 統合DB チャネル別集計 =====');
+  let totalActive = 0;
+  Object.entries(stats).sort((a, b) => b[1].activeGross - a[1].activeGross).forEach(([ch, s]) => {
+    Logger.log(`${ch}: 有効${s.active}件 ¥${s.activeGross.toLocaleString()} / 全${s.all}件 ¥${s.allGross.toLocaleString()}`);
+    totalActive += s.activeGross;
+  });
+  Logger.log(`--- 有効売上(税込)合計: ¥${totalActive.toLocaleString()} ---`);
+
+  // 各CSVタブの状況
+  Logger.log('===== CSVタブの状況 =====');
+  [
+    [ANALYTICS_CONFIG.SHEETS.AJ_CSV,      '予約番号'],
+    [ANALYTICS_CONFIG.SHEETS.JALAN_CSV,   '予約番号'],
+    [ANALYTICS_CONFIG.SHEETS.ASOVIEW_CSV, '予約グループID'],
+    [ANALYTICS_CONFIG.SHEETS.DIRECT_CSV,  '参加'],
+  ].forEach(([name, keyword]) => {
+    const s = ss.getSheetByName(name);
+    if (!s) { Logger.log(`${name}: シートなし`); return; }
+    const hr = findHeaderRow(s, keyword);
+    const lastRow = s.getLastRow();
+    Logger.log(`${name}: 最終行${lastRow}, ヘッダー行=${hr ? hr + ' ("' + keyword + '"検出)' : 'なし(キーワード未検出!)'}`);
+    if (hr) {
+      const headers = s.getRange(hr, 1, 1, s.getLastColumn()).getValues()[0].filter(String);
+      Logger.log(`  → 列: ${headers.join(', ')}`);
+    }
+  });
+
+  // アソビューCSV内の媒体列の値を集計
+  Logger.log('===== アソビューCSV 媒体列の実値 =====');
+  const asoSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.ASOVIEW_CSV);
+  if (asoSheet) {
+    const hr = findHeaderRow(asoSheet, '予約グループID');
+    if (hr) {
+      const headers = asoSheet.getRange(hr, 1, 1, asoSheet.getLastColumn()).getValues()[0];
+      const col = buildColMap(headers);
+      if (col['媒体'] !== undefined) {
+        const data = asoSheet.getRange(hr + 1, 1, asoSheet.getLastRow() - hr, asoSheet.getLastColumn()).getValues();
+        const mediaCount = {};
+        data.forEach(r => {
+          const m = String(r[col['媒体']] || '(空)').trim();
+          mediaCount[m] = (mediaCount[m] || 0) + 1;
+        });
+        Object.entries(mediaCount).forEach(([m, c]) => Logger.log(`  媒体="${m}": ${c}件`));
+      } else {
+        Logger.log('  「媒体」列が見つかりません。列名: ' + headers.filter(String).join(', '));
+      }
+    }
+  }
+}
+
+// ============================================================
 // デバッグ：目標値の読み込み確認
 // ============================================================
 function debugTargets() {
