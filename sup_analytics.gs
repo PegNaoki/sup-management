@@ -16,6 +16,7 @@ const ANALYTICS_CONFIG = {
     MONTHLY_DASH: '【月次ダッシュボード】',
     DAILY_DASH:   '【日次ダッシュボード】',
     CUSTOMER:     '【顧客分析】',
+    WEEKLY_REPORT: '【週次レポート】',
   },
 
   // チャネル別手数料率（初期値 / 【目標】タブで上書き可）
@@ -1312,6 +1313,183 @@ function setupDirectInputSheet() {
   );
 
   Logger.log('【直接_CSV】整備完了（ヘッダー＋入力規則）');
+}
+
+// ============================================================
+// Step 2: 週次スナップショット
+//   毎週の実績を構造化データ(JSON)にまとめる。
+//   これがClaude APIに渡す分析材料になる。
+// ============================================================
+function buildWeeklySnapshot(refDate) {
+  const ss      = getAnalyticsSS();
+  const dbSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.UNIFIED_DB);
+  const tgtSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.TARGET);
+  const dbData  = dbSheet.getDataRange().getValues();
+  const targets = loadTargets(tgtSheet);
+
+  const today = refDate ? new Date(refDate) : new Date();
+
+  // 集計対象週：先週の月曜〜日曜（レポートは週明けに先週分を振り返る想定）
+  const thisMonday = getMonday(today);
+  const lastMonday = new Date(thisMonday); lastMonday.setDate(thisMonday.getDate() - 7);
+  const lastSunday = new Date(thisMonday); lastSunday.setDate(thisMonday.getDate() - 1);
+  const prevMonday = new Date(lastMonday); prevMonday.setDate(lastMonday.getDate() - 7);
+  const prevSunday = new Date(lastMonday); prevSunday.setDate(lastMonday.getDate() - 1);
+
+  const year      = today.getFullYear();
+  const month     = today.getMonth() + 1;
+  const curYM     = `${year}-${String(month).padStart(2, '0')}`;
+
+  // 集計バケツ
+  const blank = () => ({ bookings: 0, pax: 0, gross: 0, net: 0, commission: 0, channels: {} });
+  const acc = (b, row) => {
+    const g = Number(row[DB.REVENUE_GROSS - 1]) || 0;
+    const n = Number(row[DB.REVENUE_NET - 1])   || 0;
+    const c = Number(row[DB.COMMISSION_AMT - 1])|| 0;
+    const p = Number(row[DB.PAX_TOTAL - 1])     || 0;
+    const ch = row[DB.CHANNEL - 1] || '不明';
+    b.bookings++; b.pax += p; b.gross += g; b.net += n; b.commission += c;
+    if (!b.channels[ch]) b.channels[ch] = { bookings: 0, gross: 0 };
+    b.channels[ch].bookings++; b.channels[ch].gross += g;
+  };
+
+  const lastWeek = blank();   // 先週実施分
+  const prevWeek = blank();   // 前々週実施分（前週比用）
+  const monthTD  = blank();   // 今月累計（今月実施分）
+  const yearTD   = blank();   // 今年累計（今年実施分）
+  const lastYearTD = blank(); // 前年同月までの累計（同月比較用）
+  let upcomingBookings = 0, upcomingPax = 0, upcomingGross = 0; // 今後の予約（先の参加日でキャンセル以外）
+
+  for (let i = 1; i < dbData.length; i++) {
+    const row = dbData[i];
+    if (row[DB.STATUS - 1] === 'cancelled') continue;
+    const dv = row[DB.ACTIVITY_DATE - 1];
+    if (!dv) continue;
+    const d = dv instanceof Date ? dv : new Date(dv);
+    if (isNaN(d.getTime())) continue;
+
+    if (d >= lastMonday && d <= lastSunday) acc(lastWeek, row);
+    if (d >= prevMonday && d <= prevSunday) acc(prevWeek, row);
+    if (d.getFullYear() === year && d.getMonth() + 1 === month) acc(monthTD, row);
+    if (d.getFullYear() === year) acc(yearTD, row);
+    if (d.getFullYear() === year - 1 && (d.getMonth() + 1) <= month) acc(lastYearTD, row);
+    if (d > today) { upcomingBookings++; upcomingPax += Number(row[DB.PAX_TOTAL-1])||0; upcomingGross += Number(row[DB.REVENUE_GROSS-1])||0; }
+  }
+
+  // 月目標・年目標
+  const monthTgt = targets[curYM] || { bookings: 0, pax: 0, revenue: 0 };
+  let yearTgt = { bookings: 0, pax: 0, revenue: 0 };
+  Object.entries(targets).forEach(([ym, t]) => {
+    if (ym.slice(0, 4) === String(year)) {
+      yearTgt.bookings += t.bookings || 0;
+      yearTgt.pax      += t.pax      || 0;
+      yearTgt.revenue  += t.revenue  || 0;
+    }
+  });
+  // 当月までの累計目標（年内・当月以前の月のみ）
+  let ytdTgt = { bookings: 0, pax: 0, revenue: 0 };
+  Object.entries(targets).forEach(([ym, t]) => {
+    if (ym.slice(0, 4) === String(year) && Number(ym.slice(5, 7)) <= month) {
+      ytdTgt.bookings += t.bookings || 0;
+      ytdTgt.pax      += t.pax      || 0;
+      ytdTgt.revenue  += t.revenue  || 0;
+    }
+  });
+
+  const pct = (a, b) => (b > 0 ? a / b : null);
+  const wow = (a, b) => (b > 0 ? (a - b) / b : null);
+
+  const fmtChannels = (b) => Object.entries(b.channels)
+    .sort((x, y) => y[1].gross - x[1].gross)
+    .map(([name, v]) => ({ channel: name, bookings: v.bookings, gross: v.gross }));
+
+  // 自動アラート検知
+  const alerts = [];
+  const ytdRevRate = pct(yearTD.gross, ytdTgt.revenue);
+  if (ytdRevRate !== null && ytdRevRate < 0.8)
+    alerts.push(`年累計売上が当月累計目標の${Math.round(ytdRevRate*100)}%（80%未満）`);
+  const monthRevRate = pct(monthTD.gross, monthTgt.revenue);
+  if (monthRevRate !== null && monthRevRate < 0.8)
+    alerts.push(`今月売上が月目標の${Math.round(monthRevRate*100)}%（80%未満）`);
+  const wowGross = wow(lastWeek.gross, prevWeek.gross);
+  if (wowGross !== null && wowGross < -0.2)
+    alerts.push(`先週売上が前週比${Math.round(wowGross*100)}%（2割超の減少）`);
+  if (lastWeek.bookings === 0)
+    alerts.push('先週の参加実績が0件');
+
+  const snapshot = {
+    generatedAt: today.toISOString(),
+    period: {
+      reportWeek: `${fmtDate(lastMonday)}〜${fmtDate(lastSunday)}`,
+      year, month, currentYM: curYM,
+    },
+    lastWeek: {
+      bookings: lastWeek.bookings, pax: lastWeek.pax,
+      gross: lastWeek.gross, net: lastWeek.net,
+      channels: fmtChannels(lastWeek),
+    },
+    weekOverWeek: {
+      prevWeekGross: prevWeek.gross,
+      grossChangePct: wowGross,
+      bookingsChange: lastWeek.bookings - prevWeek.bookings,
+    },
+    monthToDate: {
+      bookings: monthTD.bookings, pax: monthTD.pax, gross: monthTD.gross, net: monthTD.net,
+      target: monthTgt,
+      achievement: {
+        bookings: pct(monthTD.bookings, monthTgt.bookings),
+        pax:      pct(monthTD.pax,      monthTgt.pax),
+        revenue:  pct(monthTD.gross,    monthTgt.revenue),
+      },
+      channels: fmtChannels(monthTD),
+    },
+    yearToDate: {
+      bookings: yearTD.bookings, pax: yearTD.pax, gross: yearTD.gross, net: yearTD.net,
+      commissionRate: yearTD.gross > 0 ? yearTD.commission / yearTD.gross : null,
+      grossMarginRate: yearTD.gross > 0 ? yearTD.net / yearTD.gross : null,
+      ytdTarget: ytdTgt,
+      annualTarget: yearTgt,
+      ytdAchievement: {
+        bookings: pct(yearTD.bookings, ytdTgt.bookings),
+        pax:      pct(yearTD.pax,      ytdTgt.pax),
+        revenue:  pct(yearTD.gross,    ytdTgt.revenue),
+      },
+      annualAchievement: {
+        bookings: pct(yearTD.bookings, yearTgt.bookings),
+        revenue:  pct(yearTD.gross,    yearTgt.revenue),
+      },
+    },
+    lastYearComparison: {
+      lastYearYtdGross: lastYearTD.gross,
+      lastYearYtdBookings: lastYearTD.bookings,
+      yoyGrossChangePct: wow(yearTD.gross, lastYearTD.gross),
+    },
+    upcoming: {
+      bookings: upcomingBookings, pax: upcomingPax, gross: upcomingGross,
+    },
+    alerts,
+  };
+
+  return snapshot;
+}
+
+// 週次スナップショットをログに整形出力（動作確認用）
+function debugWeeklySnapshot() {
+  const snap = buildWeeklySnapshot();
+  Logger.log(JSON.stringify(snap, null, 2));
+}
+
+// 指定日(月曜)を返す
+function getMonday(d) {
+  const date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = date.getDay(); // 0=日
+  const diff = (day === 0 ? -6 : 1 - day);
+  date.setDate(date.getDate() + diff);
+  return date;
+}
+
+function fmtDate(d) {
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 // ============================================================
