@@ -8,7 +8,7 @@ const CONFIG = {
   SPREADSHEET_ID: 'YOUR_SPREADSHEET_ID',   // スプレッドシートID（URLの /d/XXXX/edit の部分）
   SHEET_NAME: '予約一覧',
   CALENDAR_ID: 'YOUR_CALENDAR_ID',          // カレンダーID（カレンダー設定の「カレンダーID」）
-  SEARCH_QUERY: 'subject:(SUP 予約) OR subject:(SUP予約) OR subject:(スタンドアップパドル 予約)',
+  SEARCH_QUERY: 'subject:(じゃらんnet遊び・体験予約) OR subject:(アクティビティジャパン) OR subject:(アソビュー)',
   PROCESSED_LABEL: 'SUP予約/処理済',
   EVENT_DURATION_HOURS: 2,                  // カレンダーイベントの所要時間（時間）
 };
