@@ -1495,6 +1495,13 @@ function seedHistoricalTargets() {
     { ym: '2025-08', bookings: 149, pax: 384, revenue:  2715000 },
     { ym: '2025-09', bookings:  32, pax:  81, revenue:   507500 },
     { ym: '2025-10', bookings:  11, pax:  27, revenue:   169500 },
+    // 2026年
+    { ym: '2026-05', bookings:   6, pax:  24, revenue:   167400 },
+    { ym: '2026-06', bookings:   4, pax:  16, revenue:   111600 },
+    { ym: '2026-07', bookings:  32, pax: 128, revenue:   950400 },
+    { ym: '2026-08', bookings:  54, pax: 216, revenue:  1603800 },
+    { ym: '2026-09', bookings:  21, pax:  84, revenue:   623700 },
+    { ym: '2026-10', bookings:   4, pax:  16, revenue:   111600 },
   ];
 
   // 既存データを読み込み、重複しないYMだけ追加
