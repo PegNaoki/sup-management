@@ -5,10 +5,10 @@
 // ============================================================
 
 const CONFIG = {
-  SPREADSHEET_ID: 'YOUR_SPREADSHEET_ID',   // スプレッドシートID（URLの /d/XXXX/edit の部分）
+  SPREADSHEET_ID: '1zaAb-6KRCoK4ACZWOlHZ3LnzKkDoVAs_In7aDOS9Vqo',
   SHEET_NAME: '予約一覧',
-  CALENDAR_ID: 'YOUR_CALENDAR_ID',          // カレンダーID（カレンダー設定の「カレンダーID」）
-  EVENT_DURATION_HOURS: 2,                  // カレンダーイベントの所要時間（時間）
+  CALENDAR_ID: '525a17f19df6b579e2ba94ea40b12c31a8b1fb21e1ae5610481c74314aab74e7@group.calendar.google.com',
+  EVENT_DURATION_HOURS: 2,
   PROCESSED_LABEL: 'SUP予約/処理済',
 
   // 差出人アドレスで絞り込み（件名より確実）
