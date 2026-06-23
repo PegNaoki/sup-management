@@ -213,39 +213,11 @@ function buildCalendarEvent({ site, name, kana, people, peopleDetail, amount, pa
 }
 
 // ============================================================
-// onEdit：追加インストラクター担当列の変更を検知してカレンダーを更新
+// onEdit：スプレッドシート編集時のフック（カレンダーは初回作成後に触らない）
 // ============================================================
 function onEdit(e) {
-  const sheet = e.range.getSheet();
-  if (sheet.getName() !== CONFIG.SHEET_NAME) return;
-
-  const col = e.range.getColumn();
-  const row = e.range.getRow();
-  if (col !== COLUMNS.INSTRUCTOR_NAME || row < 2) return;
-
-  const instructorName = e.range.getValue();
-  if (!instructorName) return;
-
-  const data           = sheet.getRange(row, 1, 1, COLUMNS.MESSAGE_ID).getValues()[0];
-  const calEventId     = data[COLUMNS.CALENDAR_ID_COL - 1];
-  if (!calEventId) return;
-
-  try {
-    const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
-    const event    = calendar.getEventById(calEventId);
-    if (!event) return;
-
-    // 説明文の「追加インストラクター担当：〇〇」を更新
-    const oldDesc   = event.getDescription();
-    const newDesc   = oldDesc.replace(
-      /追加インストラクター担当：.*/,
-      `追加インストラクター担当：${instructorName}`
-    );
-    event.setDescription(newDesc);
-    Logger.log(`カレンダー更新：追加インストラクター担当 → ${instructorName}`);
-  } catch (err) {
-    Logger.log(`onEdit カレンダー更新エラー: ${err.message}`);
-  }
+  // カレンダーへの自動反映は行わない。
+  // 初回作成後の詳細欄は手動管理のため、上書きを防ぐために意図的に無効化している。
 }
 
 // ============================================================
@@ -257,18 +229,16 @@ function handleCancellation(sheet, rowNum, msgId, subject) {
   sheet.getRange(rowNum, COLUMNS.SUBJECT).setValue(subject);
   sheet.getRange(rowNum, COLUMNS.MESSAGE_ID).setValue(msgId);
 
-  // カレンダーイベントが登録済みなら【キャンセル】を付ける
+  // カレンダーイベントが登録済みなら削除する
   const calEventId = sheet.getRange(rowNum, COLUMNS.CALENDAR_ID_COL).getValue();
   if (calEventId) {
     try {
       const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
       const event    = calendar.getEventById(calEventId);
-      if (event) {
-        event.setTitle('【キャンセル】' + event.getTitle());
-        event.setColor(CalendarApp.EventColor.GRAY);
-      }
+      if (event) event.deleteEvent();
+      sheet.getRange(rowNum, COLUMNS.CALENDAR_ID_COL).setValue('');
     } catch (e) {
-      Logger.log(`カレンダー更新エラー: ${e.message}`);
+      Logger.log(`カレンダー削除エラー: ${e.message}`);
     }
   }
 
