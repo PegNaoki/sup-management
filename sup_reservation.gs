@@ -8,26 +8,40 @@ const CONFIG = {
   SPREADSHEET_ID: 'YOUR_SPREADSHEET_ID',   // スプレッドシートID（URLの /d/XXXX/edit の部分）
   SHEET_NAME: '予約一覧',
   CALENDAR_ID: 'YOUR_CALENDAR_ID',          // カレンダーID（カレンダー設定の「カレンダーID」）
-  SEARCH_QUERY: 'subject:(SUP 予約) OR subject:(SUP予約) OR subject:(スタンドアップパドル 予約)',
+  SEARCH_QUERY: 'subject:(じゃらんnet遊び・体験予約) OR subject:(アクティビティジャパン) OR subject:(アソビュー！)',
   PROCESSED_LABEL: 'SUP予約/処理済',
   EVENT_DURATION_HOURS: 2,                  // カレンダーイベントの所要時間（時間）
 };
 
+// 予約タイプ判定キーワード
+const CONFIRMED_KEYWORDS = [
+  '予約確定通知',
+  '決済完了',
+  '即時確定予約通知',
+  '予約が確定しました',
+];
+const TENTATIVE_KEYWORDS = [
+  '仮予約通知',
+  '仮予約受付',
+  '予約のリクエスト',
+];
+
 // スプレッドシートの列定義
 const COLUMNS = {
-  TIMESTAMP:    1,  // A: 処理日時
-  SUBJECT:      2,  // B: メール件名
-  BOOKING_SITE: 3,  // C: 予約サイト
-  NAME:         4,  // D: 予約者名
-  DATE:         5,  // E: 予約日
-  TIME:         6,  // F: 予約時間
-  PEOPLE:       7,  // G: 人数
-  EMAIL:        8,  // H: メールアドレス
-  PHONE:        9,  // I: 電話番号
-  NOTES:        10, // J: 備考
-  STATUS:       11, // K: ステータス
-  CALENDAR_ID_COL: 12, // L: カレンダーイベントID
-  MESSAGE_ID:   13, // M: メッセージID（重複防止）
+  TIMESTAMP:       1,  // A: 処理日時
+  SUBJECT:         2,  // B: メール件名
+  BOOKING_SITE:    3,  // C: 予約サイト
+  BOOKING_TYPE:    4,  // D: 予約タイプ（確定／仮予約）
+  NAME:            5,  // E: 予約者名
+  DATE:            6,  // F: 予約日
+  TIME:            7,  // G: 予約時間
+  PEOPLE:          8,  // H: 人数
+  EMAIL:           9,  // I: メールアドレス
+  PHONE:           10, // J: 電話番号
+  NOTES:           11, // K: 備考
+  STATUS:          12, // L: ステータス
+  CALENDAR_ID_COL: 13, // M: カレンダーイベントID
+  MESSAGE_ID:      14, // N: メッセージID（重複防止）
 };
 
 // ============================================================
@@ -159,13 +173,16 @@ function parseEmail(message) {
 }
 
 // ------------------------------------------------------------
-// アソビュー
+// アソビュー / satsuki（アソビューの自社予約システム）
 // ------------------------------------------------------------
 function parseAsoview(subject, body, from) {
-  if (!from.includes('asoview') && !body.includes('アソビュー')) return null;
+  if (!from.includes('asoview') && !subject.includes('アソビュー！')) return null;
+
+  // satsuki経由かどうかはfromアドレスで判定
+  const site = from.includes('satsuki') ? 'satsuki' : 'アソビュー';
 
   return {
-    site: 'アソビュー',
+    site: site,
     name: extract(body, [
       /お名前[：:]\s*(.+)/,
       /予約者名[：:]\s*(.+)/,
@@ -377,23 +394,39 @@ function parseDateTime(dateStr, timeStr) {
   }
 }
 
+// 件名から予約タイプを判定
+function detectBookingType(subject) {
+  for (const kw of CONFIRMED_KEYWORDS) {
+    if (subject.includes(kw)) return '確定';
+  }
+  for (const kw of TENTATIVE_KEYWORDS) {
+    if (subject.includes(kw)) return '仮予約';
+  }
+  return '不明';
+}
+
 // シートにデータを追記
 function appendToSheet(sheet, reservation, msgId, subject) {
   const now = new Date();
+  const bookingType = detectBookingType(subject);
+  // 確定予約は最初から「承認済」、仮予約は「未確認」
+  const initialStatus = bookingType === '確定' ? '承認済' : '未確認';
+
   sheet.appendRow([
     now,                        // A: 処理日時
     subject,                    // B: メール件名
     reservation.site || '',     // C: 予約サイト
-    reservation.name || '',     // D: 予約者名
-    reservation.date || '',     // E: 予約日
-    reservation.time || '',     // F: 予約時間
-    reservation.people || '',   // G: 人数
-    reservation.email || '',    // H: メールアドレス
-    reservation.phone || '',    // I: 電話番号
-    reservation.notes || '',    // J: 備考
-    '未確認',                    // K: ステータス（初期値）
-    '',                         // L: カレンダーイベントID
-    msgId,                      // M: メッセージID
+    bookingType,                // D: 予約タイプ
+    reservation.name || '',     // E: 予約者名
+    reservation.date || '',     // F: 予約日
+    reservation.time || '',     // G: 予約時間
+    reservation.people || '',   // H: 人数
+    reservation.email || '',    // I: メールアドレス
+    reservation.phone || '',    // J: 電話番号
+    reservation.notes || '',    // K: 備考
+    initialStatus,              // L: ステータス
+    '',                         // M: カレンダーイベントID
+    msgId,                      // N: メッセージID
   ]);
 }
 
@@ -414,7 +447,7 @@ function getOrCreateSheet(ss) {
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.SHEET_NAME);
     const headers = [
-      '処理日時', 'メール件名', '予約サイト', '予約者名',
+      '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約者名',
       '予約日', '予約時間', '人数', 'メールアドレス',
       '電話番号', '備考', 'ステータス', 'カレンダーイベントID', 'メッセージID',
     ];
