@@ -1417,6 +1417,20 @@ function buildWeeklySnapshot(refDate) {
   if (lastWeek.bookings === 0)
     alerts.push('先週の参加実績が0件');
 
+  // 曜日構成：今月と前年同月の土日日数（天候・集客力の文脈分析用）
+  const countWeekends = (y, m) => {
+    let cnt = 0;
+    const days = new Date(y, m, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const dow = new Date(y, m - 1, d).getDay();
+      if (dow === 0 || dow === 6) cnt++;
+    }
+    return cnt;
+  };
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const weekendThisMonth  = countWeekends(year,     month);
+  const weekendLastYear   = countWeekends(year - 1, month);
+
   const snapshot = {
     generatedAt: today.toISOString(),
     period: {
@@ -1426,6 +1440,7 @@ function buildWeeklySnapshot(refDate) {
     lastWeek: {
       bookings: lastWeek.bookings, pax: lastWeek.pax,
       gross: lastWeek.gross, net: lastWeek.net,
+      unitGross: lastWeek.bookings > 0 ? Math.round(lastWeek.gross / lastWeek.bookings) : null,
       channels: fmtChannels(lastWeek),
     },
     weekOverWeek: {
@@ -1435,6 +1450,8 @@ function buildWeeklySnapshot(refDate) {
     },
     monthToDate: {
       bookings: monthTD.bookings, pax: monthTD.pax, gross: monthTD.gross, net: monthTD.net,
+      unitGross: monthTD.bookings > 0 ? Math.round(monthTD.gross / monthTD.bookings) : null,
+      unitPax:   monthTD.bookings > 0 ? Math.round(monthTD.pax   / monthTD.bookings * 10) / 10 : null,
       target: monthTgt,
       achievement: {
         bookings: pct(monthTD.bookings, monthTgt.bookings),
@@ -1445,6 +1462,7 @@ function buildWeeklySnapshot(refDate) {
     },
     yearToDate: {
       bookings: yearTD.bookings, pax: yearTD.pax, gross: yearTD.gross, net: yearTD.net,
+      unitGross: yearTD.bookings > 0 ? Math.round(yearTD.gross / yearTD.bookings) : null,
       commissionRate: yearTD.gross > 0 ? yearTD.commission / yearTD.gross : null,
       grossMarginRate: yearTD.gross > 0 ? yearTD.net / yearTD.gross : null,
       ytdTarget: ytdTgt,
@@ -1462,10 +1480,19 @@ function buildWeeklySnapshot(refDate) {
     lastYearComparison: {
       lastYearYtdGross: lastYearTD.gross,
       lastYearYtdBookings: lastYearTD.bookings,
+      lastYearUnitGross: lastYearTD.bookings > 0 ? Math.round(lastYearTD.gross / lastYearTD.bookings) : null,
       yoyGrossChangePct: wow(yearTD.gross, lastYearTD.gross),
+      yoyBookingsChangePct: wow(yearTD.bookings, lastYearTD.bookings),
+      yoyUnitGrossChangePct: (yearTD.bookings > 0 && lastYearTD.bookings > 0)
+        ? wow(yearTD.gross / yearTD.bookings, lastYearTD.gross / lastYearTD.bookings) : null,
     },
     upcoming: {
       bookings: upcomingBookings, pax: upcomingPax, gross: upcomingGross,
+    },
+    weekdayProfile: {
+      month: { totalDays: daysInMonth, weekendDays: weekendThisMonth, weekdays: daysInMonth - weekendThisMonth },
+      lastYearSameMonth: { weekendDays: weekendLastYear, weekdays: new Date(year-1, month, 0).getDate() - weekendLastYear },
+      weekendDaysDiff: weekendThisMonth - weekendLastYear,
     },
     alerts,
   };
@@ -1498,23 +1525,35 @@ function fmtDate(d) {
 
 // メイン：週次レポートを生成して記録＆通知
 function generateWeeklyReport() {
-  const snapshot = buildWeeklySnapshot();
-  const prompt   = buildAnalysisPrompt(snapshot);
-  const report   = callClaudeAPI(prompt);
+  const snapshot   = buildWeeklySnapshot();
+  const prompt     = buildAnalysisPrompt(snapshot);
+  const analysis   = callClaudeAPI(prompt);
+  const docUrl     = createWeeklyReportDoc(snapshot, analysis);
 
-  writeWeeklyReport(snapshot, report);
+  writeWeeklyReport(snapshot, analysis, docUrl);
 
   // LINEにサマリー通知（postToLineはsup_reservation.gs側に定義）
   try {
     if (typeof postToLine === 'function') {
-      postToLine(`📊【SUP週次レポート】${snapshot.period.reportWeek}\n\n${report}`);
+      const ytd = snapshot.yearToDate;
+      const ach = ytd.ytdAchievement.revenue;
+      const achStr = ach !== null ? `${Math.round(ach * 100)}%` : '-';
+      const lineMsg = [
+        `📊【SUP週次レポート】${snapshot.period.reportWeek}`,
+        `年累計売上: ¥${ytd.gross.toLocaleString()} (目標比 ${achStr})`,
+        `先行予約: ${snapshot.upcoming.bookings}件 / ¥${snapshot.upcoming.gross.toLocaleString()}`,
+        '',
+        '📄 詳細レポート:',
+        docUrl,
+      ].join('\n');
+      postToLine(lineMsg);
     }
   } catch (e) {
     Logger.log('LINE通知スキップ: ' + e);
   }
 
-  Logger.log(report);
-  return report;
+  Logger.log(`週次レポート生成完了: ${docUrl}`);
+  return docUrl;
 }
 
 // Claude API呼び出し
@@ -1565,62 +1604,197 @@ function callClaudeAPI(prompt) {
 
 // 分析プロンプトの組み立て
 function buildAnalysisPrompt(snapshot) {
+  const wp = snapshot.weekdayProfile;
+  const weekendNote = wp
+    ? `今月の土日日数: ${wp.month.weekendDays}日（前年同月: ${wp.lastYearSameMonth.weekendDays}日、差: ${wp.weekendDaysDiff > 0 ? '+' : ''}${wp.weekendDaysDiff}日）`
+    : '';
+
   return [
     'あなたはSUP（スタンドアップパドルボード）体験事業の経営アナリストです。',
-    '以下の週次データを分析し、経営者向けの簡潔な日本語レポートを作成してください。',
+    '以下の週次データを分析し、経営者向けの日本語レポートを作成してください。',
     '',
     '# 事業概要',
     '- 福島県の屋外SUP体験事業（裏磐梯）',
     '- 営業期間：5〜10月のみ（冬季はオフシーズン）',
     '- 予約経路：OTA（じゃらん／AJ／アソビュー、手数料16.5%）、自社HP予約satsuki（手数料3%）、直接予約（LINE／インスタ／その他、手数料0%）',
     '- 「売上」は税込（お客様支払額）、「手取り」は手数料控除後',
+    weekendNote,
     '',
     '# 今週時点のデータ（JSON）',
     '```json',
     JSON.stringify(snapshot, null, 2),
     '```',
     '',
-    '# 注意点',
-    '- 現在はシーズンのどの段階か（初期5-6月／最盛期7-8月／終盤9-10月）を考慮すること',
-    '- 達成率・前年同期比・チャネル別の動きから示唆を出すこと',
+    '# 注意事項（必ず守ること）',
+    '- 数値の引用はJSONの値をそのまま使い、自分で計算しないこと（計算誤りを防ぐため）',
+    '- 客単価はunitGrossフィールドの値を使うこと',
+    '- 前年比はyoyGrossChangePct・yoyBookingsChangePct・yoyUnitGrossChangePctフィールドを使うこと',
+    '- シーズンの段階（初期5-6月／最盛期7-8月／終盤9-10月）を踏まえた評価をすること',
     '- upcoming（今後の確定予約）も踏まえて先行きを評価すること',
-    '- シーズン初期は実績が少ないのは自然なので過度に悲観しないこと',
     '',
-    '# 出力フォーマット（Markdown）',
-    '## 📈 現状サマリー',
-    '（3行以内で全体像）',
+    '# 出力フォーマット（Markdown、このセクション2つだけ出力）',
+    '## 🔍 差異の原因仮説',
+    '（目標・前年との差が生じている要因を、曜日構成・チャネル変化・単価・人数の観点から2〜3点。数値を具体的に引用）',
     '',
-    '## 🔍 注目ポイント',
-    '（達成率・前年比・チャネル動向から2〜3点、数値を具体的に引用）',
-    '',
-    '## ✅ 今週の推奨アクション',
-    '（実行可能な具体策を優先順位つきで3つ。なぜ効くのかも一言添える）',
+    '## ✅ 具体的アクション提案',
+    '優先順位をつけて以下の2グループに分けて記述：',
+    '### 来週中に実行できること',
+    '（価格変更、SNS投稿、OTA露出強化など、今すぐできる施策を2〜3つ。なぜ効くかも一言）',
+    '### 今月残りで挽回できる施策',
+    '（残り期間での売上回復・チャネル改善策を1〜2つ）',
   ].join('\n');
 }
 
+// Google Docsに週次レポートを作成してURLを返す
+function createWeeklyReportDoc(snapshot, analysisText) {
+  const title = `SUP週次レポート ${snapshot.period.year}年${snapshot.period.month}月 (${snapshot.period.reportWeek})`;
+  const doc  = DocumentApp.create(title);
+  const body = doc.getBody();
+
+  // ドライブで「リンクを知っている全員が閲覧可」に設定
+  try {
+    DriveApp.getFileById(doc.getId())
+      .setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {
+    Logger.log('Drive共有設定スキップ: ' + e);
+  }
+
+  const mtd  = snapshot.monthToDate;
+  const ytd  = snapshot.yearToDate;
+  const lyc  = snapshot.lastYearComparison;
+  const up   = snapshot.upcoming;
+  const tgt  = mtd.target;
+  const ach  = mtd.achievement;
+  const ytdA = ytd.ytdAchievement;
+
+  const pctStr  = (v) => v !== null && v !== undefined ? `${Math.round(v * 100)}%` : '-';
+  const yen     = (v) => v != null ? `¥${Math.round(v).toLocaleString()}` : '-';
+  const num     = (v) => v != null ? String(v) : '-';
+
+  // ===== タイトル =====
+  body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING1);
+  body.appendParagraph(`生成日: ${Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy年MM月dd日 HH:mm')}`);
+
+  // ===== 現状把握 =====
+  body.appendParagraph('📊 現状把握').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+
+  // 今月 目標 vs 実績
+  body.appendParagraph(`今月実績 vs 目標 (${snapshot.period.year}年${snapshot.period.month}月)`)
+    .setHeading(DocumentApp.ParagraphHeading.HEADING3);
+  _styleTable(body.appendTable([
+    ['指標', '目標', '実績', '達成率'],
+    ['予約数', num(tgt.bookings) + '件', mtd.bookings + '件', pctStr(ach.bookings)],
+    ['人数',   num(tgt.pax)      + '人', mtd.pax      + '人', pctStr(ach.pax)],
+    ['売上',   yen(tgt.revenue),          yen(mtd.gross),      pctStr(ach.revenue)],
+    ['手取り', '-',                        yen(mtd.net),        '-'],
+    ['客単価', '-',                        yen(mtd.unitGross),  '-'],
+  ]));
+
+  // 前年同月比
+  body.appendParagraph('前年同月比 (累計)').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+  _styleTable(body.appendTable([
+    ['指標', '前年同期', '今年同期', '増減率'],
+    ['予約数', num(lyc.lastYearYtdBookings) + '件', num(ytd.bookings) + '件', pctStr(lyc.yoyBookingsChangePct)],
+    ['売上',   yen(lyc.lastYearYtdGross),            yen(ytd.gross),            pctStr(lyc.yoyGrossChangePct)],
+    ['客単価', yen(lyc.lastYearUnitGross),            yen(ytd.unitGross),        pctStr(lyc.yoyUnitGrossChangePct)],
+  ]));
+
+  // 年累計 目標達成率
+  body.appendParagraph('年累計 目標達成率').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+  _styleTable(body.appendTable([
+    ['指標', '累計目標', '実績', '達成率', '年間目標', '年間達成率'],
+    ['予約数', num(ytd.ytdTarget.bookings) + '件', num(ytd.bookings) + '件', pctStr(ytdA.bookings),
+              num(ytd.annualTarget.bookings) + '件', pctStr(ytd.annualAchievement.bookings)],
+    ['売上',   yen(ytd.ytdTarget.revenue),           yen(ytd.gross),           pctStr(ytdA.revenue),
+              yen(ytd.annualTarget.revenue),           pctStr(ytd.annualAchievement.revenue)],
+  ]));
+
+  // チャネル別貢献度
+  body.appendParagraph('チャネル別貢献度 (今月)').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+  if (mtd.channels && mtd.channels.length > 0) {
+    const chRows = [['チャネル', '件数', '売上', '構成比']];
+    mtd.channels.forEach(ch => {
+      const share = mtd.gross > 0 ? Math.round(ch.gross / mtd.gross * 100) : 0;
+      chRows.push([ch.channel, ch.bookings + '件', yen(ch.gross), share + '%']);
+    });
+    _styleTable(body.appendTable(chRows));
+  } else {
+    body.appendParagraph('（今月実績なし）');
+  }
+
+  // 先行予約
+  body.appendParagraph('先行予約（今後の確定済み）').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+  _styleTable(body.appendTable([
+    ['予約件数', '人数', '売上見込み'],
+    [up.bookings + '件', up.pax + '人', yen(up.gross)],
+  ]));
+
+  // アラート
+  if (snapshot.alerts && snapshot.alerts.length > 0) {
+    body.appendParagraph('⚠️ アラート').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    snapshot.alerts.forEach(a => body.appendListItem(a));
+  }
+
+  // ===== Claude分析テキスト =====
+  // Markdownをパースしてドキュメントに挿入
+  const lines = analysisText.split('\n');
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      body.appendParagraph(line.slice(3)).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    } else if (line.startsWith('### ')) {
+      body.appendParagraph(line.slice(4)).setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    } else if (/^(\d+\.|-)/.test(line.trim())) {
+      body.appendListItem(line.replace(/^(\d+\.|-)[\s*]+/, '').replace(/\*\*/g, ''));
+    } else if (line.trim() !== '') {
+      body.appendParagraph(line.replace(/\*\*/g, ''));
+    }
+  }
+
+  doc.saveAndClose();
+  return `https://docs.google.com/document/d/${doc.getId()}/edit`;
+}
+
+// テーブルのヘッダー行をスタイリング
+function _styleTable(table) {
+  const header = table.getRow(0);
+  for (let c = 0; c < header.getNumCells(); c++) {
+    const cell = header.getCell(c);
+    cell.setBackgroundColor('#4a86e8');
+    cell.editAsText().setForegroundColor('#ffffff').setBold(true);
+  }
+  return table;
+}
+
 // 【週次レポート】シートに記録
-function writeWeeklyReport(snapshot, reportText) {
+function writeWeeklyReport(snapshot, analysisText, docUrl) {
   const ss = getAnalyticsSS();
   let sheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.WEEKLY_REPORT);
   if (!sheet) sheet = ss.insertSheet(ANALYTICS_CONFIG.SHEETS.WEEKLY_REPORT);
 
   if (sheet.getRange(1, 1).getValue() !== '生成日時') {
-    sheet.getRange(1, 1, 1, 5).setValues([['生成日時', '対象週', '年累計達成率', 'レポート', 'スナップショットJSON']])
+    sheet.getRange(1, 1, 1, 6).setValues([['生成日時', '対象週', '年累計達成率', 'Docリンク', 'AI分析テキスト', 'スナップショットJSON']])
       .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
     sheet.setFrozenRows(1);
-    sheet.setColumnWidth(4, 600);
+    sheet.setColumnWidth(4, 250);
+    sheet.setColumnWidth(5, 500);
   }
 
   const ytdRate = snapshot.yearToDate.ytdAchievement.revenue;
   sheet.insertRowAfter(1);
-  sheet.getRange(2, 1, 1, 5).setValues([[
+  sheet.getRange(2, 1, 1, 6).setValues([[
     new Date(),
     snapshot.period.reportWeek,
     ytdRate !== null ? `${Math.round(ytdRate * 100)}%` : '-',
-    reportText,
+    docUrl || '',
+    analysisText,
     JSON.stringify(snapshot),
   ]]);
-  sheet.getRange(2, 4).setWrap(true).setVerticalAlignment('top');
+  sheet.getRange(2, 5).setWrap(true).setVerticalAlignment('top');
+
+  // DocリンクをHYPERLINKで表示
+  if (docUrl) {
+    sheet.getRange(2, 4).setFormula(`=HYPERLINK("${docUrl}","📄 レポートを開く")`);
+  }
 }
 
 // 週次トリガーを設定（毎週月曜 8:00）
