@@ -9,8 +9,8 @@ const CONFIG = {
   EVENT_DURATION_HOURS: 2,
   PROCESSED_LABEL:    'SUP予約/処理済',
 
-  // 差出人アドレスで絞り込み
-  SEARCH_QUERY: 'in:anywhere ('
+  // 差出人アドレス＋SUPキーワードで絞り込み（Gmail側で件数を減らしタイムアウト防止）
+  SEARCH_QUERY: 'in:anywhere (SUP OR サップ) ('
     + 'from:reservation@activityboard.jp'
     + ' OR from:reservation_request@activityboard.jp'
     + ' OR from:mailsender@asoview.com'
@@ -42,46 +42,48 @@ const COLUMNS = {
 };
 
 // ============================================================
-// メイン処理：メール取込（バッチ処理・1回20件ずつ）
+// メイン処理：メール取込（通常トリガー用・直近50件）
 // ============================================================
 function importReservationEmails() {
-  const props = PropertiesService.getScriptProperties();
+  importEmails_(50);
+}
+
+// ============================================================
+// 過去メール全件一括取込（手動実行用・最大500件）
+// ============================================================
+function importAllHistoricalEmails() {
+  PropertiesService.getScriptProperties().deleteProperty('IMPORT_OFFSET');
+  importEmails_(500);
+}
+
+// ============================================================
+// 共通取込処理
+// ============================================================
+function importEmails_(limit) {
   const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   const sheet = getOrCreateSheet(ss);
   const label = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
 
-  const offset  = parseInt(props.getProperty('IMPORT_OFFSET') || '0', 10);
-  const BATCH   = 20;
-  const threads = GmailApp.search(CONFIG.SEARCH_QUERY, offset, BATCH);
-
-  // 既存データをメモリに読み込む（重複チェック用）
+  const threads  = GmailApp.search(CONFIG.SEARCH_QUERY, 0, limit);
   const existing = loadExistingReservations(sheet);
 
-  let newCount    = 0;
-  let updateCount = 0;
+  let newCount = 0, updateCount = 0;
 
   threads.forEach(thread => {
     thread.getMessages().forEach(message => {
       const msgId = message.getId();
-
-      // 同じメッセージIDは処理済みスキップ
       if (existing.byMsgId.has(msgId)) return;
 
       const reservation = parseEmail(message);
       if (!reservation) return;
 
-      // SUPに関係しないメールは除外
-      if (!isSUP(reservation, message.getPlainBody())) return;
-
       const bookingNo   = reservation.bookingNo;
       const existingRow = bookingNo ? existing.byBookingNo.get(bookingNo) : null;
 
       if (existingRow) {
-        // 同じ予約番号がある → ステータスを最新に更新
         updateRow(sheet, existingRow, reservation, msgId, message.getSubject());
         updateCount++;
       } else {
-        // 新規追加
         appendToSheet(sheet, reservation, msgId, message.getSubject());
         newCount++;
       }
@@ -90,20 +92,7 @@ function importReservationEmails() {
   });
 
   if (newCount > 0 || updateCount > 0) SpreadsheetApp.flush();
-
-  if (threads.length === BATCH) {
-    props.setProperty('IMPORT_OFFSET', String(offset + BATCH));
-    Logger.log(`新規${newCount}件・更新${updateCount}件。次回は${offset + BATCH}件目から再開`);
-  } else {
-    props.deleteProperty('IMPORT_OFFSET');
-    Logger.log(`取込完了（新規${newCount}件・更新${updateCount}件）`);
-  }
-}
-
-// 過去メール一括取込（手動実行用）
-function importAllHistoricalEmails() {
-  PropertiesService.getScriptProperties().deleteProperty('IMPORT_OFFSET');
-  importReservationEmails();
+  Logger.log(`取込完了：新規${newCount}件・更新${updateCount}件（対象スレッド${threads.length}件）`);
 }
 
 // ============================================================
@@ -372,11 +361,16 @@ function getOrCreateSheet(ss) {
   let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.SHEET_NAME);
-    const headers = [
-      '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約番号', '予約者名',
-      '予約日', '予約時間', '人数', 'メールアドレス',
-      '電話番号', '備考', 'ステータス', 'カレンダーイベントID', 'メッセージID',
-    ];
+  }
+
+  // ヘッダーが正しく入っていない場合は常に上書き
+  const headers = [
+    '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約番号', '予約者名',
+    '予約日', '予約時間', '人数', 'メールアドレス',
+    '電話番号', '備考', 'ステータス', 'カレンダーイベントID', 'メッセージID',
+  ];
+  const firstCell = sheet.getRange(1, 1).getValue();
+  if (firstCell !== '処理日時') {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, headers.length)
