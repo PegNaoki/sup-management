@@ -1214,6 +1214,9 @@ function setupAnalyticsSheets() {
     }
   });
 
+  // 過去目標値を自動シード
+  seedHistoricalTargets();
+
   Logger.log('セットアップ完了。SPREADSHEET_IDを設定してnormalizeAllCSV()を実行してください。');
 }
 
@@ -1462,6 +1465,94 @@ function updateDashboardOnly() {
   updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
   Logger.log('ダッシュボード更新完了');
+}
+
+// ============================================================
+// 過去の目標値をシードデータとして【目標】タブに書き込む
+// ============================================================
+function seedHistoricalTargets() {
+  const ss       = getAnalyticsSS();
+  const tgtSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.TARGET);
+  if (!tgtSheet) {
+    Logger.log('【目標】シートが見つかりません。先にsetupAnalyticsSheets()を実行してください。');
+    return;
+  }
+
+  // Excelから抽出した月別目標値（税込売上ベース）
+  // R6 = 2024年、R7 = 2025年（5〜10月のみ営業期間）
+  const SEED_TARGETS = [
+    // 2024年（R6）
+    { ym: '2024-05', bookings:   8, pax:  35, revenue:   207500 },
+    { ym: '2024-06', bookings:   5, pax:  10, revenue:    65000 },
+    { ym: '2024-07', bookings:  17, pax:  50, revenue:   325000 },
+    { ym: '2024-08', bookings: 113, pax: 380, revenue:  2650000 },
+    { ym: '2024-09', bookings:  21, pax:  64, revenue:   416000 },
+    { ym: '2024-10', bookings:   2, pax:   5, revenue:    32500 },
+    // 2025年（R7）
+    { ym: '2025-05', bookings:  18, pax:  71, revenue:   427500 },
+    { ym: '2025-06', bookings:  19, pax:  44, revenue:   273000 },
+    { ym: '2025-07', bookings:  38, pax:  93, revenue:   581500 },
+    { ym: '2025-08', bookings: 149, pax: 384, revenue:  2715000 },
+    { ym: '2025-09', bookings:  32, pax:  81, revenue:   507500 },
+    { ym: '2025-10', bookings:  11, pax:  27, revenue:   169500 },
+  ];
+
+  // 既存データを読み込み、重複しないYMだけ追加
+  const existing = new Set();
+  const lastRow  = tgtSheet.getLastRow();
+  if (lastRow > 1) {
+    const ymCol = tgtSheet.getRange(2, 1, lastRow - 1, 1).getValues().flat();
+    ymCol.forEach(v => {
+      if (!v) return;
+      if (v instanceof Date) {
+        existing.add(`${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}`);
+      } else {
+        existing.add(String(v).trim());
+      }
+    });
+  }
+
+  // ヘッダーから列マップを取得
+  const headers = tgtSheet.getRange(1, 1, 1, tgtSheet.getLastColumn()).getValues()[0];
+  const col = buildColMap(headers);
+
+  let added = 0;
+  SEED_TARGETS.forEach(t => {
+    if (existing.has(t.ym)) return;
+    const row = new Array(headers.length).fill('');
+    row[col['年月']]     = t.ym;
+    row[col['目標_予約数']] = t.bookings;
+    row[col['目標_人数']]   = t.pax;
+    row[col['目標_売上']]   = t.revenue;
+    // 手数料率は共通デフォルト値をセット
+    if (col['手数料率_AJ']      !== undefined) row[col['手数料率_AJ']]      = ANALYTICS_CONFIG.COMMISSION_RATES['AJ'];
+    if (col['手数料率_じゃらん'] !== undefined) row[col['手数料率_じゃらん']] = ANALYTICS_CONFIG.COMMISSION_RATES['じゃらん'];
+    if (col['手数料率_アソビュー']!== undefined) row[col['手数料率_アソビュー']]= ANALYTICS_CONFIG.COMMISSION_RATES['アソビュー'];
+    if (col['手数料率_satsuki'] !== undefined) row[col['手数料率_satsuki']] = ANALYTICS_CONFIG.COMMISSION_RATES['satsuki'];
+    if (col['手数料率_Web予約']  !== undefined) row[col['手数料率_Web予約']]  = ANALYTICS_CONFIG.COMMISSION_RATES['Web予約'];
+    if (col['手数料率_直接']     !== undefined) row[col['手数料率_直接']]     = ANALYTICS_CONFIG.COMMISSION_RATES['直接'];
+    if (col['手数料率_ライン']   !== undefined) row[col['手数料率_ライン']]   = ANALYTICS_CONFIG.COMMISSION_RATES['ライン'];
+    if (col['手数料率_インスタ'] !== undefined) row[col['手数料率_インスタ']] = ANALYTICS_CONFIG.COMMISSION_RATES['インスタ'];
+    tgtSheet.appendRow(row);
+    existing.add(t.ym);
+    added++;
+  });
+
+  // 年月列を昇順ソート（ヘッダー行除く）
+  const allRows = tgtSheet.getRange(2, 1, tgtSheet.getLastRow() - 1, headers.length).getValues();
+  allRows.sort((a, b) => {
+    const ka = a[col['年月']] instanceof Date
+      ? `${a[col['年月']].getFullYear()}-${String(a[col['年月']].getMonth()+1).padStart(2,'0')}`
+      : String(a[col['年月']]);
+    const kb = b[col['年月']] instanceof Date
+      ? `${b[col['年月']].getFullYear()}-${String(b[col['年月']].getMonth()+1).padStart(2,'0')}`
+      : String(b[col['年月']]);
+    return ka.localeCompare(kb);
+  });
+  tgtSheet.getRange(2, 1, allRows.length, headers.length).setValues(allRows);
+
+  SpreadsheetApp.flush();
+  Logger.log(`目標値シード完了：${added}件追加`);
 }
 
 // ============================================================
