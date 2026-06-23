@@ -38,8 +38,9 @@ const COLUMNS = {
   PHONE:           15, // O: 電話番号
   NOTES:           16, // P: 備考
   STATUS:          17, // Q: ステータス
-  CALENDAR_ID_COL: 18, // R: カレンダーイベントID
-  MESSAGE_ID:      19, // S: メッセージID（重複防止）
+  ACTION_MEMO:     18, // R: 対応メモ
+  CALENDAR_ID_COL: 19, // S: カレンダーイベントID
+  MESSAGE_ID:      20, // T: メッセージID（重複防止）
 };
 
 // ============================================================
@@ -308,6 +309,10 @@ function detectBookingType(subject) {
   return '不明';
 }
 
+function initialStatus(bookingType) {
+  return bookingType === '確定' ? '承認済' : '未対応';
+}
+
 function parseDateTime(dateStr, timeStr) {
   try {
     let year, month, day, hour = 9, minute = 0;
@@ -352,8 +357,7 @@ function loadExistingReservations(sheet) {
 }
 
 function appendToSheet(sheet, r, msgId, subject) {
-  const bookingType   = detectBookingType(subject);
-  const initialStatus = bookingType === '確定' ? '承認済' : '未確認';
+  const bookingType = detectBookingType(subject);
 
   sheet.appendRow([
     new Date(),
@@ -372,8 +376,9 @@ function appendToSheet(sheet, r, msgId, subject) {
     r.email        || '',
     r.phone        || '',
     r.notes        || '',
-    initialStatus,
-    '',
+    initialStatus(bookingType),
+    '',   // 対応メモ（空欄）
+    '',   // カレンダーイベントID
     msgId,
   ]);
 }
@@ -415,7 +420,7 @@ function getOrCreateSheet(ss) {
     '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約番号',
     '予約者名', 'フリガナ', '予約日', '予約時間', '人数',
     '人数内訳', '金額', '支払方法', 'メールアドレス', '電話番号',
-    '備考', 'ステータス', 'カレンダーイベントID', 'メッセージID',
+    '備考', 'ステータス', '対応メモ', 'カレンダーイベントID', 'メッセージID',
   ];
 
   if (sheet.getRange(1, 1).getValue() !== '処理日時') {
@@ -425,7 +430,7 @@ function getOrCreateSheet(ss) {
       .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
 
     const rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(['未確認', '承認済', '却下', 'キャンセル', 'カレンダー登録済'])
+      .requireValueInList(['未対応', '対応中', '承認済', '却下', 'キャンセル', 'カレンダー登録済'])
       .build();
     sheet.getRange(2, COLUMNS.STATUS, 1000, 1).setDataValidation(rule);
     sheet.hideColumns(COLUMNS.MESSAGE_ID);
