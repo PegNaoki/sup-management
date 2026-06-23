@@ -369,16 +369,21 @@ function buildLineMessage(notifyType, r, slotInfo) {
 }
 
 function postToLine(message) {
-  const token = PropertiesService.getScriptProperties().getProperty('LINE_NOTIFY_TOKEN');
-  if (!token) {
-    Logger.log('LINE_NOTIFY_TOKEN が未設定です（スクリプトプロパティに追加してください）');
+  const token  = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_TOKEN');
+  const userId = PropertiesService.getScriptProperties().getProperty('LINE_USER_ID');
+  if (!token || !userId) {
+    Logger.log('LINE_CHANNEL_TOKEN または LINE_USER_ID が未設定です（スクリプトプロパティに追加してください）');
     return;
   }
   try {
-    UrlFetchApp.fetch('https://notify-api.line.me/api/notify', {
-      method:  'post',
-      headers: { Authorization: `Bearer ${token}` },
-      payload: { message },
+    UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      method:      'post',
+      contentType: 'application/json',
+      headers:     { Authorization: `Bearer ${token}` },
+      payload: JSON.stringify({
+        to: userId,
+        messages: [{ type: 'text', text: message }],
+      }),
     });
   } catch (e) {
     Logger.log(`LINE通知エラー: ${e.message}`);
