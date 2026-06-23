@@ -1532,22 +1532,20 @@ function generateWeeklyReport() {
 
   writeWeeklyReport(snapshot, analysis, docUrl);
 
-  // LINEにサマリー通知（postToLineはsup_reservation.gs側に定義）
+  // LINEにサマリー通知
   try {
-    if (typeof postToLine === 'function') {
-      const ytd = snapshot.yearToDate;
-      const ach = ytd.ytdAchievement.revenue;
-      const achStr = ach !== null ? `${Math.round(ach * 100)}%` : '-';
-      const lineMsg = [
-        `📊【SUP週次レポート】${snapshot.period.reportWeek}`,
-        `年累計売上: ¥${ytd.gross.toLocaleString()} (目標比 ${achStr})`,
-        `先行予約: ${snapshot.upcoming.bookings}件 / ¥${snapshot.upcoming.gross.toLocaleString()}`,
-        '',
-        '📄 詳細レポート:',
-        docUrl,
-      ].join('\n');
-      postToLine(lineMsg);
-    }
+    const ytd = snapshot.yearToDate;
+    const ach = ytd.ytdAchievement.revenue;
+    const achStr = ach !== null ? `${Math.round(ach * 100)}%` : '-';
+    const lineMsg = [
+      `📊【SUP週次レポート】${snapshot.period.reportWeek}`,
+      `年累計売上: ¥${ytd.gross.toLocaleString()} (目標比 ${achStr})`,
+      `先行予約: ${snapshot.upcoming.bookings}件 / ¥${snapshot.upcoming.gross.toLocaleString()}`,
+      '',
+      '📄 詳細レポート:',
+      docUrl,
+    ].join('\n');
+    sendLineMessage_(lineMsg);
   } catch (e) {
     Logger.log('LINE通知スキップ: ' + e);
   }
@@ -1795,6 +1793,23 @@ function writeWeeklyReport(snapshot, analysisText, docUrl) {
   if (docUrl) {
     sheet.getRange(2, 4).setFormula(`=HYPERLINK("${docUrl}","📄 レポートを開く")`);
   }
+}
+
+// LINE Push通知（このプロジェクト内で完結）
+function sendLineMessage_(message) {
+  const token  = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_TOKEN');
+  const userId = PropertiesService.getScriptProperties().getProperty('LINE_USER_ID');
+  if (!token || !userId) {
+    Logger.log('LINE_CHANNEL_TOKEN または LINE_USER_ID が未設定');
+    return;
+  }
+  UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: `Bearer ${token}` },
+    payload: JSON.stringify({ to: userId, messages: [{ type: 'text', text: message }] }),
+    muteHttpExceptions: true,
+  });
 }
 
 // 週次トリガーを設定（毎週月曜 8:00）
