@@ -3,8 +3,7 @@
 // ============================================================
 
 const ANALYTICS_CONFIG = {
-  // 新しいスプレッドシートのIDをここに設定
-  SPREADSHEET_ID: '',
+  SPREADSHEET_ID: '18rnnxbGmwsF9aKUBUdUJpPqABwJpVSwfoJwitkb7Q0M',
 
   SHEETS: {
     TARGET:       '【目標】',
