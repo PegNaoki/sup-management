@@ -1,350 +1,260 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>アラームアプリ</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>近くの図書館を探す</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Segoe UI', sans-serif;
-      background: #0f0f1a;
-      color: #fff;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
+      font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', sans-serif;
+      background: #f0f4f8;
+      color: #333;
       min-height: 100vh;
-      padding: 40px 20px;
     }
-
-    h1 {
-      font-size: 1.4rem;
-      font-weight: 400;
-      letter-spacing: 0.2em;
-      color: #aaa;
-      margin-bottom: 40px;
-      text-transform: uppercase;
-    }
-
-    .clock {
-      font-size: 5rem;
-      font-weight: 200;
-      letter-spacing: 0.05em;
-      color: #fff;
-      margin-bottom: 60px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .set-alarm {
-      background: #1a1a2e;
-      border: 1px solid #2a2a4a;
-      border-radius: 16px;
-      padding: 28px 32px;
-      width: 100%;
-      max-width: 360px;
-      margin-bottom: 40px;
-    }
-
-    .set-alarm label {
-      display: block;
-      font-size: 0.75rem;
-      letter-spacing: 0.15em;
-      color: #888;
-      text-transform: uppercase;
-      margin-bottom: 12px;
-    }
-
-    .time-input-row {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 16px;
-    }
-
-    .time-input-row input[type="time"] {
-      flex: 1;
-      background: #0f0f1a;
-      border: 1px solid #2a2a4a;
-      border-radius: 10px;
-      color: #fff;
-      font-size: 1.6rem;
-      font-weight: 200;
-      padding: 14px 18px;
-      outline: none;
-      width: 100%;
-      color-scheme: dark;
-    }
-
-    .time-input-row input[type="time"]:focus {
-      border-color: #6c63ff;
-    }
-
-    .add-btn {
-      width: 100%;
-      background: #6c63ff;
-      border: none;
-      border-radius: 10px;
-      color: #fff;
-      font-size: 0.9rem;
-      letter-spacing: 0.1em;
-      padding: 14px;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-
-    .add-btn:hover {
-      background: #574fd6;
-    }
-
-    .alarm-list {
-      width: 100%;
-      max-width: 360px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .alarm-list h2 {
-      font-size: 0.75rem;
-      letter-spacing: 0.15em;
-      color: #888;
-      text-transform: uppercase;
-      margin-bottom: 4px;
-    }
-
-    .alarm-item {
-      background: #1a1a2e;
-      border: 1px solid #2a2a4a;
-      border-radius: 14px;
-      padding: 18px 20px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      transition: border-color 0.2s;
-    }
-
-    .alarm-item.ringing {
-      border-color: #6c63ff;
-      animation: pulse 0.8s infinite alternate;
-    }
-
-    @keyframes pulse {
-      from { background: #1a1a2e; }
-      to   { background: #1e1a40; }
-    }
-
-    .alarm-time {
-      font-size: 1.8rem;
-      font-weight: 200;
-      letter-spacing: 0.05em;
-    }
-
-    .alarm-controls {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-    }
-
-    .toggle {
-      width: 44px;
-      height: 24px;
-      background: #333;
-      border-radius: 12px;
-      position: relative;
-      cursor: pointer;
-      transition: background 0.2s;
-      border: none;
-    }
-
-    .toggle.on {
-      background: #6c63ff;
-    }
-
-    .toggle::after {
-      content: '';
-      position: absolute;
-      width: 18px;
-      height: 18px;
-      background: #fff;
-      border-radius: 50%;
-      top: 3px;
-      left: 3px;
-      transition: left 0.2s;
-    }
-
-    .toggle.on::after {
-      left: 23px;
-    }
-
-    .delete-btn {
-      background: none;
-      border: none;
-      color: #555;
-      font-size: 1.1rem;
-      cursor: pointer;
-      padding: 4px;
-      transition: color 0.2s;
-      line-height: 1;
-    }
-
-    .delete-btn:hover {
-      color: #e05c5c;
-    }
-
-    .stop-btn {
-      width: 100%;
-      background: #e05c5c;
-      border: none;
-      border-radius: 10px;
-      color: #fff;
-      font-size: 0.9rem;
-      letter-spacing: 0.1em;
-      padding: 14px;
-      cursor: pointer;
-      margin-top: 14px;
-      transition: background 0.2s;
-    }
-
-    .stop-btn:hover {
-      background: #c04545;
-    }
-
-    .empty {
-      color: #444;
-      font-size: 0.85rem;
+    header {
+      background: #2563eb;
+      color: white;
+      padding: 1.5rem 1rem;
       text-align: center;
-      padding: 20px 0;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
     }
+    header h1 { font-size: 1.6rem; margin-bottom: 0.3rem; }
+    header p { font-size: 0.9rem; opacity: 0.85; }
+    .container { max-width: 800px; margin: 0 auto; padding: 1.5rem 1rem; }
+    .search-box {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      margin-bottom: 1.5rem;
+    }
+    .input-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+    input[type="text"] {
+      flex: 1;
+      min-width: 180px;
+      padding: 0.6rem 0.8rem;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 1rem;
+    }
+    input[type="text"]:focus { outline: none; border-color: #2563eb; }
+    button {
+      padding: 0.6rem 1.2rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-secondary { background: #10b981; color: white; }
+    .btn-secondary:hover { background: #059669; }
+    .btn-primary:disabled, .btn-secondary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .api-key-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      color: #6b7280;
+    }
+    .api-key-row input { flex: 1; }
+    .note {
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin-top: 0.4rem;
+    }
+    #status {
+      text-align: center;
+      padding: 1rem;
+      color: #6b7280;
+      font-size: 0.95rem;
+    }
+    .library-list { display: flex; flex-direction: column; gap: 1rem; }
+    .library-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.2rem 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+    }
+    .library-info h2 { font-size: 1.05rem; margin-bottom: 0.3rem; color: #1e40af; }
+    .library-info .address { font-size: 0.85rem; color: #6b7280; margin-bottom: 0.2rem; }
+    .library-info .tel { font-size: 0.85rem; color: #374151; }
+    .library-info .url { font-size: 0.8rem; }
+    .library-info .url a { color: #2563eb; text-decoration: none; }
+    .library-info .url a:hover { text-decoration: underline; }
+    .distance-badge {
+      background: #eff6ff;
+      color: #1d4ed8;
+      border-radius: 8px;
+      padding: 0.3rem 0.7rem;
+      font-size: 0.85rem;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .error { color: #dc2626; background: #fef2f2; border-radius: 8px; padding: 1rem; margin-top: 0.5rem; }
+    .spinner {
+      display: inline-block;
+      width: 20px; height: 20px;
+      border: 3px solid #d1d5db;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-
-  <h1>Alarm</h1>
-  <div class="clock" id="clock">00:00:00</div>
-
-  <div class="set-alarm">
-    <label>新しいアラーム</label>
-    <div class="time-input-row">
-      <input type="time" id="timeInput" />
+  <header>
+    <h1>📚 近くの図書館を探す</h1>
+    <p>現在地または都道府県・市区町村から近くの図書館を検索します</p>
+  </header>
+  <div class="container">
+    <div class="search-box">
+      <div class="api-key-row">
+        <label for="appkey">CALILアプリキー:</label>
+        <input type="text" id="appkey" placeholder="アプリキーを入力" />
+      </div>
+      <p class="note">※ <a href="https://calil.jp/api/dashboard/" target="_blank">CALIL</a> でアプリキーを取得してください（無料）</p>
+      <hr style="margin: 1rem 0; border: none; border-top: 1px solid #e5e7eb;">
+      <div class="input-row">
+        <input type="text" id="pref" placeholder="都道府県（例: 東京都）" />
+        <input type="text" id="city" placeholder="市区町村（例: 渋谷区）」" />
+        <button class="btn-primary" onclick="searchByCity()">🔍 地名で検索</button>
+      </div>
+      <div style="text-align: center; color: #9ca3af; margin-bottom: 0.8rem;">— または —</div>
+      <div style="text-align: center;">
+        <button class="btn-secondary" onclick="searchByLocation()">📍 現在地から検索</button>
+      </div>
     </div>
-    <button class="add-btn" onclick="addAlarm()">追加</button>
+    <div id="status"></div>
+    <div id="results" class="library-list"></div>
   </div>
-
-  <div class="alarm-list">
-    <h2>設定済み</h2>
-    <div id="alarmItems"><p class="empty">アラームがありません</p></div>
-  </div>
-
-  <audio id="beep" preload="auto"></audio>
 
   <script>
-    let alarms = JSON.parse(localStorage.getItem('alarms') || '[]');
-    let ringingId = null;
-    let audioCtx = null;
-    let beepInterval = null;
+    const CALIL_BASE = 'https://api.calil.jp/library';
 
-    function getAudioCtx() {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      return audioCtx;
+    function getAppKey() {
+      const key = document.getElementById('appkey').value.trim();
+      // テスト用デモキー（本番では自分のキーを使用）
+      return key || 'demo';
     }
 
-    function playBeep() {
-      const ctx = getAudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      gain.gain.setValueAtTime(0.4, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.4);
+    function setStatus(msg, isLoading = false) {
+      document.getElementById('status').innerHTML =
+        (isLoading ? '<span class="spinner"></span>' : '') + msg;
     }
 
-    function startRinging(id) {
-      ringingId = id;
-      playBeep();
-      beepInterval = setInterval(playBeep, 600);
-      render();
+    function setError(msg) {
+      document.getElementById('results').innerHTML = `<div class="error">⚠️ ${msg}</div>`;
+      setStatus('');
     }
 
-    function stopRinging() {
-      clearInterval(beepInterval);
-      beepInterval = null;
-      ringingId = null;
-      render();
+    function searchByCity() {
+      const pref = document.getElementById('pref').value.trim();
+      const city = document.getElementById('city').value.trim();
+      if (!pref && !city) { setError('都道府県または市区町村を入力してください'); return; }
+      fetchLibraries({ pref, city });
     }
 
-    function tickClock() {
-      const now = new Date();
-      const hh = String(now.getHours()).padStart(2, '0');
-      const mm = String(now.getMinutes()).padStart(2, '0');
-      const ss = String(now.getSeconds()).padStart(2, '0');
-      document.getElementById('clock').textContent = `${hh}:${mm}:${ss}`;
+    function searchByLocation() {
+      if (!navigator.geolocation) { setError('このブラウザは位置情報に対応していません'); return; }
+      setStatus('位置情報を取得中...', true);
+      navigator.geolocation.getCurrentPosition(
+        pos => fetchLibraries({ geocode: `${pos.coords.longitude},${pos.coords.latitude}` }),
+        err => setError('位置情報の取得に失敗しました: ' + err.message)
+      );
+    }
 
-      const current = `${hh}:${mm}`;
-      if (ss === '00') {
-        alarms.forEach(a => {
-          if (a.enabled && a.time === current && ringingId !== a.id) {
-            startRinging(a.id);
-          }
-        });
+    function fetchLibraries(params) {
+      setStatus('図書館を検索中...', true);
+      document.getElementById('results').innerHTML = '';
+
+      const appkey = getAppKey();
+      const qs = new URLSearchParams({ appkey, limit: 20, ...params });
+      const url = `${CALIL_BASE}?${qs}`;
+
+      // JSONP で取得（CORS対応）
+      const cbName = 'calilCallback_' + Date.now();
+      const script = document.createElement('script');
+      let done = false;
+
+      const timer = setTimeout(() => {
+        if (!done) { done = true; cleanup(); setError('タイムアウトしました。もう一度お試しください。'); }
+      }, 10000);
+
+      window[cbName] = function(data) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        cleanup();
+        renderLibraries(data, params.geocode);
+      };
+
+      function cleanup() {
+        delete window[cbName];
+        if (script.parentNode) script.parentNode.removeChild(script);
       }
+
+      script.src = url + `&callback=${cbName}`;
+      script.onerror = () => { if (!done) { done = true; clearTimeout(timer); cleanup(); setError('APIの呼び出しに失敗しました。アプリキーを確認してください。'); } };
+      document.head.appendChild(script);
     }
 
-    function addAlarm() {
-      const val = document.getElementById('timeInput').value;
-      if (!val) return;
-      const alarm = { id: Date.now(), time: val, enabled: true };
-      alarms.push(alarm);
-      save();
-      render();
+    function calcDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
-    function toggleAlarm(id) {
-      alarms = alarms.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a);
-      save();
-      render();
-    }
-
-    function deleteAlarm(id) {
-      if (ringingId === id) stopRinging();
-      alarms = alarms.filter(a => a.id !== id);
-      save();
-      render();
-    }
-
-    function save() {
-      localStorage.setItem('alarms', JSON.stringify(alarms));
-    }
-
-    function render() {
-      const container = document.getElementById('alarmItems');
-      if (alarms.length === 0) {
-        container.innerHTML = '<p class="empty">アラームがありません</p>';
+    function renderLibraries(data, geocode) {
+      const list = document.getElementById('results');
+      if (!data || data.length === 0) {
+        setStatus('図書館が見つかりませんでした');
         return;
       }
-      container.innerHTML = alarms.map(a => `
-        <div class="alarm-item ${ringingId === a.id ? 'ringing' : ''}">
-          <span class="alarm-time">${a.time}</span>
-          <div class="alarm-controls">
-            <button class="toggle ${a.enabled ? 'on' : ''}" onclick="toggleAlarm(${a.id})"></button>
-            <button class="delete-btn" onclick="deleteAlarm(${a.id})">✕</button>
-          </div>
-        </div>
-        ${ringingId === a.id ? `<button class="stop-btn" onclick="stopRinging()">アラームを止める</button>` : ''}
-      `).join('');
-    }
+      setStatus(`${data.length}件の図書館が見つかりました`);
 
-    render();
-    setInterval(tickClock, 1000);
-    tickClock();
+      let userLat, userLon;
+      if (geocode) {
+        const parts = geocode.split(',');
+        userLon = parseFloat(parts[0]);
+        userLat = parseFloat(parts[1]);
+      }
+
+      list.innerHTML = data.map(lib => {
+        let distHtml = '';
+        if (userLat && lib.geocode) {
+          const [libLon, libLat] = lib.geocode.split(',').map(Number);
+          const km = calcDistance(userLat, userLon, libLat, libLon);
+          distHtml = `<div class="distance-badge">${km < 1 ? (km*1000).toFixed(0)+'m' : km.toFixed(1)+'km'}</div>`;
+        }
+        return `
+          <div class="library-card">
+            <div class="library-info">
+              <h2>${lib.formal || lib.short || '（名称不明）'}</h2>
+              ${lib.address ? `<div class="address">📍 ${lib.address}</div>` : ''}
+              ${lib.tel ? `<div class="tel">📞 ${lib.tel}</div>` : ''}
+              ${lib.url ? `<div class="url"><a href="${lib.url}" target="_blank">🔗 公式サイト</a></div>` : ''}
+            </div>
+            ${distHtml}
+          </div>`;
+      }).join('');
+    }
   </script>
 </body>
 </html>
