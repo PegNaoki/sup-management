@@ -27,27 +27,31 @@ const CANCEL_KEYWORDS     = ['キャンセル通知', 'キャンセルされま�
 const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
 
 const COLUMNS = {
-  TIMESTAMP:       1,  // A: 処理日時
-  SUBJECT:         2,  // B: メール件名
-  BOOKING_SITE:    3,  // C: 予約サイト
-  BOOKING_TYPE:    4,  // D: 予約タイプ
-  BOOKING_NO:      5,  // E: 予約番号
-  NAME:            6,  // F: 予約者名
-  KANA:            7,  // G: フリガナ
-  DATE:            8,  // H: 予約日
-  TIME:            9,  // I: 予約時間
-  PEOPLE:          10, // J: 人数（合計）
-  PEOPLE_DETAIL:   11, // K: 人数内訳
-  AMOUNT:          12, // L: 金額
-  PAYMENT:         13, // M: 支払方法
-  EMAIL:           14, // N: メールアドレス
-  PHONE:           15, // O: 電話番号
-  NOTES:           16, // P: 備考
-  STATUS:          17, // Q: ステータス
-  ACTION_MEMO:     18, // R: 対応メモ
-  CALENDAR_ID_COL: 19, // S: カレンダーイベントID
-  MESSAGE_ID:      20, // T: メッセージID（重複防止）
+  TIMESTAMP:          1,  // A: 処理日時
+  SUBJECT:            2,  // B: メール件名
+  BOOKING_SITE:       3,  // C: 予約サイト
+  BOOKING_TYPE:       4,  // D: 予約タイプ
+  BOOKING_NO:         5,  // E: 予約番号
+  NAME:               6,  // F: 予約者名
+  KANA:               7,  // G: フリガナ
+  DATE:               8,  // H: 予約日
+  TIME:               9,  // I: 予約時間
+  PEOPLE:             10, // J: 人数（合計）
+  PEOPLE_DETAIL:      11, // K: 人数内訳
+  AMOUNT:             12, // L: 金額
+  PAYMENT:            13, // M: 支払方法
+  EMAIL:              14, // N: メールアドレス
+  PHONE:              15, // O: 電話番号
+  NOTES:              16, // P: 備考
+  INSTRUCTOR_NEEDED:  17, // Q: 追加インストラクター（必要/不要）
+  INSTRUCTOR_NAME:    18, // R: 追加インストラクター担当
+  STATUS:             19, // S: ステータス
+  ACTION_MEMO:        20, // T: 対応メモ
+  CALENDAR_ID_COL:    21, // U: カレンダーイベントID
+  MESSAGE_ID:         22, // V: メッセージID（重複防止）
 };
+
+const INSTRUCTOR_THRESHOLD = 6; // 追加インストラクターが必要な人数
 
 // ============================================================
 // メイン処理：メール取込
@@ -129,18 +133,20 @@ function registerApprovedToCalendar() {
     const calEventId = row[COLUMNS.CALENDAR_ID_COL - 1];
     if (status !== '承認済' || calEventId) continue;
 
-    const site         = row[COLUMNS.BOOKING_SITE - 1];
-    const name         = row[COLUMNS.NAME - 1];
-    const kana         = row[COLUMNS.KANA - 1];
-    const dateStr      = row[COLUMNS.DATE - 1];
-    const timeStr      = row[COLUMNS.TIME - 1];
-    const people       = row[COLUMNS.PEOPLE - 1];
-    const peopleDetail = row[COLUMNS.PEOPLE_DETAIL - 1];
-    const amount       = row[COLUMNS.AMOUNT - 1];
-    const payment      = row[COLUMNS.PAYMENT - 1];
-    const email        = row[COLUMNS.EMAIL - 1];
-    const phone        = row[COLUMNS.PHONE - 1];
-    const notes        = row[COLUMNS.NOTES - 1];
+    const site               = row[COLUMNS.BOOKING_SITE - 1];
+    const name               = row[COLUMNS.NAME - 1];
+    const kana               = row[COLUMNS.KANA - 1];
+    const dateStr            = row[COLUMNS.DATE - 1];
+    const timeStr            = row[COLUMNS.TIME - 1];
+    const people             = row[COLUMNS.PEOPLE - 1];
+    const peopleDetail       = row[COLUMNS.PEOPLE_DETAIL - 1];
+    const amount             = row[COLUMNS.AMOUNT - 1];
+    const payment            = row[COLUMNS.PAYMENT - 1];
+    const email              = row[COLUMNS.EMAIL - 1];
+    const phone              = row[COLUMNS.PHONE - 1];
+    const notes              = row[COLUMNS.NOTES - 1];
+    const instructorNeeded   = row[COLUMNS.INSTRUCTOR_NEEDED - 1];
+    const instructorName     = row[COLUMNS.INSTRUCTOR_NAME - 1];
 
     const startDate = parseDateTime(dateStr, timeStr);
     if (!startDate) {
@@ -148,21 +154,11 @@ function registerApprovedToCalendar() {
       continue;
     }
 
-    const endDate       = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
-    const displayName   = kana || name;
-    const peopleStr     = peopleDetail || `${people}名`;
-    const titleParts    = [`【${site}】${displayName}`, peopleStr, amount, payment].filter(Boolean);
-    const title         = titleParts.join('｜');
-    const description   = [
-      `予約者: ${name}`,
-      kana         ? `フリガナ: ${kana}`        : '',
-      phone        ? `電話番号: ${phone}`        : '',
-      email        ? `メール: ${email}`          : '',
-      peopleDetail ? `人数内訳: ${peopleDetail}` : `人数: ${people}名`,
-      amount       ? `金額: ${amount}`           : '',
-      payment      ? `支払方法: ${payment}`      : '',
-      notes        ? `備考: ${notes}`            : '',
-    ].filter(Boolean).join('\n');
+    const endDate = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
+    const { title, description } = buildCalendarEvent({
+      site, name, kana, people, peopleDetail, amount, payment,
+      email, phone, notes, instructorNeeded, instructorName,
+    });
 
     try {
       const event = calendar.createEvent(title, startDate, endDate, { description });
@@ -177,6 +173,77 @@ function registerApprovedToCalendar() {
   if (registeredCount > 0) {
     SpreadsheetApp.flush();
     Logger.log(`${registeredCount}件をカレンダーに登録しました`);
+  }
+}
+
+// カレンダーイベントのタイトル・説明文を生成
+function buildCalendarEvent({ site, name, kana, people, peopleDetail, amount, payment,
+                               email, phone, notes, instructorNeeded, instructorName }) {
+  const needsInstructor = instructorNeeded === '必要';
+  const displayName     = kana || name;
+  const peopleStr       = peopleDetail || `${people}名`;
+  const instructorStr   = instructorName || '未定';
+
+  // タイトル：6名以上なら先頭に【要追加インストラクター】
+  const prefix     = needsInstructor ? '【要追加インストラクター】' : '';
+  const titleParts = [`【${site}】${displayName}`, peopleStr, amount, payment].filter(Boolean);
+  const title      = prefix + titleParts.join('｜');
+
+  // 説明文
+  const lines = [
+    `予約者: ${name}`,
+    kana         ? `フリガナ: ${kana}`        : '',
+    phone        ? `電話番号: ${phone}`        : '',
+    email        ? `メール: ${email}`          : '',
+    peopleDetail ? `人数内訳: ${peopleDetail}` : `人数: ${people}名`,
+    amount       ? `金額: ${amount}`           : '',
+    payment      ? `支払方法: ${payment}`      : '',
+    notes        ? `備考: ${notes}`            : '',
+  ];
+
+  if (needsInstructor) {
+    lines.push('');
+    lines.push(`追加インストラクター：必要`);
+    lines.push(`追加インストラクター担当：${instructorStr}`);
+  }
+
+  const description = lines.filter(l => l !== null && l !== undefined).join('\n').trim();
+  return { title, description };
+}
+
+// ============================================================
+// onEdit：追加インストラクター担当列の変更を検知してカレンダーを更新
+// ============================================================
+function onEdit(e) {
+  const sheet = e.range.getSheet();
+  if (sheet.getName() !== CONFIG.SHEET_NAME) return;
+
+  const col = e.range.getColumn();
+  const row = e.range.getRow();
+  if (col !== COLUMNS.INSTRUCTOR_NAME || row < 2) return;
+
+  const instructorName = e.range.getValue();
+  if (!instructorName) return;
+
+  const data           = sheet.getRange(row, 1, 1, COLUMNS.MESSAGE_ID).getValues()[0];
+  const calEventId     = data[COLUMNS.CALENDAR_ID_COL - 1];
+  if (!calEventId) return;
+
+  try {
+    const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+    const event    = calendar.getEventById(calEventId);
+    if (!event) return;
+
+    // 説明文の「追加インストラクター担当：〇〇」を更新
+    const oldDesc   = event.getDescription();
+    const newDesc   = oldDesc.replace(
+      /追加インストラクター担当：.*/,
+      `追加インストラクター担当：${instructorName}`
+    );
+    event.setDescription(newDesc);
+    Logger.log(`カレンダー更新：追加インストラクター担当 → ${instructorName}`);
+  } catch (err) {
+    Logger.log(`onEdit カレンダー更新エラー: ${err.message}`);
   }
 }
 
@@ -435,28 +502,35 @@ function loadExistingReservations(sheet) {
   return { byBookingNo, byMsgId };
 }
 
+function resolveInstructor(people) {
+  const count = parseInt(people, 10);
+  return (!isNaN(count) && count >= INSTRUCTOR_THRESHOLD) ? '必要' : '不要';
+}
+
 function appendToSheet(sheet, r, msgId, subject, bookingType) {
   sheet.appendRow([
-    new Date(),
-    subject,
-    r.site         || '',
-    bookingType,
-    r.bookingNo    || '',
-    r.name         || '',
-    r.kana         || '',
-    r.date         || '',
-    r.time         || '',
-    r.people       || '',
-    r.peopleDetail || '',
-    r.amount       || '',
-    r.payment      || '',
-    r.email        || '',
-    r.phone        || '',
-    r.notes        || '',
-    resolveStatus(bookingType, r),
-    '',   // 対応メモ
-    '',   // カレンダーイベントID
-    msgId,
+    new Date(),                          // A: 処理日時
+    subject,                             // B: メール件名
+    r.site         || '',                // C: 予約サイト
+    bookingType,                         // D: 予約タイプ
+    r.bookingNo    || '',                // E: 予約番号
+    r.name         || '',                // F: 予約者名
+    r.kana         || '',                // G: フリガナ
+    r.date         || '',                // H: 予約日
+    r.time         || '',                // I: 予約時間
+    r.people       || '',                // J: 人数（合計）
+    r.peopleDetail || '',                // K: 人数内訳
+    r.amount       || '',                // L: 金額
+    r.payment      || '',                // M: 支払方法
+    r.email        || '',                // N: メールアドレス
+    r.phone        || '',                // O: 電話番号
+    r.notes        || '',                // P: 備考
+    resolveInstructor(r.people),         // Q: 追加インストラクター（必要/不要）
+    '',                                  // R: 追加インストラクター担当
+    resolveStatus(bookingType, r),       // S: ステータス
+    '',                                  // T: 対応メモ
+    '',                                  // U: カレンダーイベントID
+    msgId,                               // V: メッセージID
   ]);
 }
 
@@ -476,16 +550,17 @@ function updateRow(sheet, rowNum, r, msgId, subject, bookingType) {
     [COLUMNS.STATUS]:       newStatus,
     [COLUMNS.MESSAGE_ID]:   msgId,
   };
-  if (r.name)         updates[COLUMNS.NAME]          = r.name;
-  if (r.kana)         updates[COLUMNS.KANA]          = r.kana;
-  if (r.date)         updates[COLUMNS.DATE]          = r.date;
-  if (r.time)         updates[COLUMNS.TIME]          = r.time;
-  if (r.people)       updates[COLUMNS.PEOPLE]        = r.people;
-  if (r.peopleDetail) updates[COLUMNS.PEOPLE_DETAIL] = r.peopleDetail;
-  if (r.amount)       updates[COLUMNS.AMOUNT]        = r.amount;
-  if (r.payment)      updates[COLUMNS.PAYMENT]       = r.payment;
-  if (r.email)        updates[COLUMNS.EMAIL]         = r.email;
-  if (r.phone)        updates[COLUMNS.PHONE]         = r.phone;
+  if (r.name)         updates[COLUMNS.NAME]             = r.name;
+  if (r.kana)         updates[COLUMNS.KANA]             = r.kana;
+  if (r.date)         updates[COLUMNS.DATE]             = r.date;
+  if (r.time)         updates[COLUMNS.TIME]             = r.time;
+  if (r.people)       updates[COLUMNS.PEOPLE]           = r.people;
+  if (r.peopleDetail) updates[COLUMNS.PEOPLE_DETAIL]    = r.peopleDetail;
+  if (r.amount)       updates[COLUMNS.AMOUNT]           = r.amount;
+  if (r.payment)      updates[COLUMNS.PAYMENT]          = r.payment;
+  if (r.email)        updates[COLUMNS.EMAIL]            = r.email;
+  if (r.phone)        updates[COLUMNS.PHONE]            = r.phone;
+  if (r.people)       updates[COLUMNS.INSTRUCTOR_NEEDED] = resolveInstructor(r.people);
 
   Object.entries(updates).forEach(([col, val]) => {
     sheet.getRange(rowNum, Number(col)).setValue(val);
@@ -500,7 +575,8 @@ function getOrCreateSheet(ss) {
     '処理日時', 'メール件名', '予約サイト', '予約タイプ', '予約番号',
     '予約者名', 'フリガナ', '予約日', '予約時間', '人数',
     '人数内訳', '金額', '支払方法', 'メールアドレス', '電話番号',
-    '備考', 'ステータス', '対応メモ', 'カレンダーイベントID', 'メッセージID',
+    '備考', '追加インストラクター', '追加インストラクター担当',
+    'ステータス', '対応メモ', 'カレンダーイベントID', 'メッセージID',
   ];
 
   if (sheet.getRange(1, 1).getValue() !== '処理日時') {
@@ -513,6 +589,7 @@ function getOrCreateSheet(ss) {
       .requireValueInList(['未対応', '対応中', '承認済', '要確認', '却下', 'キャンセル', 'カレンダー登録済'])
       .build();
     sheet.getRange(2, COLUMNS.STATUS, 1000, 1).setDataValidation(rule);
+    sheet.hideColumns(COLUMNS.CALENDAR_ID_COL);
     sheet.hideColumns(COLUMNS.MESSAGE_ID);
   }
   return sheet;
