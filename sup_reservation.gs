@@ -49,6 +49,7 @@ const COLUMNS = {
   ACTION_MEMO:        20, // T: 対応メモ
   CALENDAR_ID_COL:    21, // U: カレンダーイベントID
   MESSAGE_ID:         22, // V: メッセージID（重複防止）
+  LINE_NOTIFIED:      23, // W: LINE通知済み
 };
 
 const INSTRUCTOR_THRESHOLD = 6; // 追加インストラクターが必要な人数
@@ -251,7 +252,6 @@ function onEdit(e) {
 // キャンセル処理
 // ============================================================
 function handleCancellation(sheet, rowNum, msgId, subject) {
-  // ステータスをキャンセルに更新
   sheet.getRange(rowNum, COLUMNS.STATUS).setValue('キャンセル');
   sheet.getRange(rowNum, COLUMNS.TIMESTAMP).setValue(new Date());
   sheet.getRange(rowNum, COLUMNS.SUBJECT).setValue(subject);
@@ -259,20 +259,191 @@ function handleCancellation(sheet, rowNum, msgId, subject) {
 
   // カレンダーイベントが登録済みなら【キャンセル】を付ける
   const calEventId = sheet.getRange(rowNum, COLUMNS.CALENDAR_ID_COL).getValue();
-  if (!calEventId) return;
-
-  try {
-    const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
-    const event    = calendar.getEventById(calEventId);
-    if (event) {
-      const newTitle = '【キャンセル】' + event.getTitle();
-      event.setTitle(newTitle);
-      event.setColor(CalendarApp.EventColor.GRAY);
-      Logger.log(`カレンダーイベントをキャンセル表記に変更: ${newTitle}`);
+  if (calEventId) {
+    try {
+      const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+      const event    = calendar.getEventById(calEventId);
+      if (event) {
+        event.setTitle('【キャンセル】' + event.getTitle());
+        event.setColor(CalendarApp.EventColor.GRAY);
+      }
+    } catch (e) {
+      Logger.log(`カレンダー更新エラー: ${e.message}`);
     }
-  } catch (e) {
-    Logger.log(`カレンダー更新エラー: ${e.message}`);
   }
+
+  // キャンセル通知（LINE通知済みでも送る）
+  const rowData  = sheet.getRange(rowNum, 1, 1, COLUMNS.LINE_NOTIFIED).getValues()[0];
+  const dateVal  = rowData[COLUMNS.DATE - 1];
+  const timeVal  = rowData[COLUMNS.TIME - 1];
+  const r = {
+    site:         rowData[COLUMNS.BOOKING_SITE - 1],
+    name:         rowData[COLUMNS.NAME - 1],
+    date:         dateVal,
+    time:         timeVal,
+    people:       rowData[COLUMNS.PEOPLE - 1],
+    peopleDetail: rowData[COLUMNS.PEOPLE_DETAIL - 1],
+    notes:        rowData[COLUMNS.NOTES - 1],
+    instructorNeeded: rowData[COLUMNS.INSTRUCTOR_NEEDED - 1],
+    instructorName:   rowData[COLUMNS.INSTRUCTOR_NAME - 1],
+  };
+  const slotInfo = getSlotCapacity(sheet, dateVal, timeVal);
+  sendLineNotification(sheet, rowNum, 'キャンセル', r, slotInfo, true);
+}
+
+// ============================================================
+// LINE通知
+// ============================================================
+
+// どの通知種別を送るかを決定（null=通知不要）
+function resolveLineNotifyType(bookingType, r, instructorNeeded) {
+  if (bookingType === 'キャンセル') return 'キャンセル';
+  if (bookingType === '変更')       return '変更';
+  if (bookingType === '仮予約')     return '仮予約';
+  if (!r.date || !r.time || !r.people) return '要確認（情報不足）';
+  if (bookingType === '確定' && instructorNeeded === '必要') return '要対応（追加インストラクター必要）';
+  if (bookingType === '確定') return '確認通知';
+  return null;
+}
+
+// 同通知種別の重複チェックを含む通知送信
+// forceResend=true でキャンセルなど既通知でも再送
+function sendLineNotification(sheet, rowNum, notifyType, r, slotInfo, forceResend) {
+  const notifiedCell = sheet.getRange(rowNum, COLUMNS.LINE_NOTIFIED);
+  const notified     = notifiedCell.getValue() || '';
+
+  // 同じ種別はスキップ（forceResend=trueの場合除く）
+  if (!forceResend && notified.split(',').map(s => s.trim()).includes(notifyType)) return;
+
+  const message = buildLineMessage(notifyType, r, slotInfo);
+  postToLine(message);
+
+  // 通知済み記録
+  const updated = notified ? `${notified},${notifyType}` : notifyType;
+  notifiedCell.setValue(updated);
+}
+
+function buildLineMessage(notifyType, r, slotInfo) {
+  const isActionRequired = notifyType !== '確認通知';
+  const header = isActionRequired
+    ? `【要対応通知】対応が必要な予約があります`
+    : `【確認通知】SUP予約が入りました`;
+
+  const dateLabel   = formatDateLabel(r.date);
+  const timeLabel   = formatTimeLabel(r.time);
+  const slotLabel   = getSlotLabel(r.time);
+  const dogLabel    = detectDog(r.notes) ? 'あり' : 'なし';
+  const peopleStr   = r.peopleDetail ? `${r.people}名（${r.peopleDetail}）` : `${r.people}名`;
+  const remaining   = slotInfo.limit - slotInfo.total;
+  const remainLabel = remaining >= 0 ? `残${remaining}名` : `超過${Math.abs(remaining)}名`;
+
+  const lines = [
+    '',
+    header,
+    '─────────────────',
+  ];
+
+  if (isActionRequired) lines.push(`⚠️ 対応理由：${notifyType}`);
+
+  lines.push(
+    `📅 日付：${dateLabel}`,
+    `🕐 時間帯：${slotLabel}（${timeLabel}）`,
+    `👥 人数：${peopleStr}`,
+    `🐕 犬：${dogLabel}`,
+    `🏪 予約サイト：${r.site || '不明'}`,
+  );
+
+  lines.push(
+    '',
+    `📊 枠状況（${slotLabel}）`,
+    `合計：${slotInfo.total}名 / 上限${slotInfo.limit}名`,
+    remainLabel,
+  );
+
+  if (r.instructorNeeded === '必要') {
+    const instructorStr = r.instructorName || '未定';
+    lines.push('', `👨‍🏫 追加インストラクター担当：${instructorStr}`);
+  }
+
+  return lines.join('\n');
+}
+
+function postToLine(message) {
+  const token = PropertiesService.getScriptProperties().getProperty('LINE_NOTIFY_TOKEN');
+  if (!token) {
+    Logger.log('LINE_NOTIFY_TOKEN が未設定です（スクリプトプロパティに追加してください）');
+    return;
+  }
+  try {
+    UrlFetchApp.fetch('https://notify-api.line.me/api/notify', {
+      method:  'post',
+      headers: { Authorization: `Bearer ${token}` },
+      payload: { message },
+    });
+  } catch (e) {
+    Logger.log(`LINE通知エラー: ${e.message}`);
+  }
+}
+
+// 日付・時刻の表示ヘルパー
+function formatDateLabel(dateVal) {
+  if (!dateVal) return '不明';
+  if (dateVal instanceof Date) {
+    const d = dateVal;
+    return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
+  }
+  return String(dateVal).replace(/年/g, '/').replace(/月/g, '/').replace(/日/g, '');
+}
+
+function formatTimeLabel(timeVal) {
+  if (!timeVal) return '不明';
+  if (timeVal instanceof Date) {
+    return `${timeVal.getHours()}:${String(timeVal.getMinutes()).padStart(2, '0')}`;
+  }
+  return String(timeVal);
+}
+
+function getSlotLabel(timeVal) {
+  let hour = 9;
+  if (timeVal instanceof Date) {
+    hour = timeVal.getHours();
+  } else {
+    const m = String(timeVal).match(/(\d{1,2}):/);
+    if (m) hour = parseInt(m[1], 10);
+  }
+  return hour < 12 ? '午前' : '午後';
+}
+
+function detectDog(notes) {
+  if (!notes) return false;
+  return /犬|ペット|ドッグ|dog/i.test(String(notes));
+}
+
+// 指定日時の枠の合計人数・上限を返す
+function getSlotCapacity(sheet, dateVal, timeVal) {
+  const data = sheet.getDataRange().getValues();
+  const targetDateStr = formatDateLabel(dateVal);
+  const targetSlot    = getSlotLabel(timeVal);
+
+  let total = 0;
+  for (let i = 1; i < data.length; i++) {
+    const row    = data[i];
+    const status = row[COLUMNS.STATUS - 1];
+    if (['キャンセル', '却下'].includes(status)) continue;
+
+    const dv = row[COLUMNS.DATE - 1];
+    const tv = row[COLUMNS.TIME - 1];
+    if (!dv) continue;
+
+    if (formatDateLabel(dv) !== targetDateStr) continue;
+    if (getSlotLabel(tv) !== targetSlot) continue;
+
+    const p = parseInt(row[COLUMNS.PEOPLE - 1], 10);
+    if (!isNaN(p)) total += p;
+  }
+
+  const limit = targetSlot === '午前' ? CONFIG.MORNING_LIMIT : CONFIG.AFTERNOON_LIMIT;
+  return { total, limit };
 }
 
 // ============================================================
@@ -508,30 +679,42 @@ function resolveInstructor(people) {
 }
 
 function appendToSheet(sheet, r, msgId, subject, bookingType) {
+  const instructorNeeded = resolveInstructor(r.people);
+  const status           = resolveStatus(bookingType, r);
   sheet.appendRow([
-    new Date(),                          // A: 処理日時
-    subject,                             // B: メール件名
-    r.site         || '',                // C: 予約サイト
-    bookingType,                         // D: 予約タイプ
-    r.bookingNo    || '',                // E: 予約番号
-    r.name         || '',                // F: 予約者名
-    r.kana         || '',                // G: フリガナ
-    r.date         || '',                // H: 予約日
-    r.time         || '',                // I: 予約時間
-    r.people       || '',                // J: 人数（合計）
-    r.peopleDetail || '',                // K: 人数内訳
-    r.amount       || '',                // L: 金額
-    r.payment      || '',                // M: 支払方法
-    r.email        || '',                // N: メールアドレス
-    r.phone        || '',                // O: 電話番号
-    r.notes        || '',                // P: 備考
-    resolveInstructor(r.people),         // Q: 追加インストラクター（必要/不要）
-    '',                                  // R: 追加インストラクター担当
-    resolveStatus(bookingType, r),       // S: ステータス
-    '',                                  // T: 対応メモ
-    '',                                  // U: カレンダーイベントID
-    msgId,                               // V: メッセージID
+    new Date(),                // A: 処理日時
+    subject,                   // B: メール件名
+    r.site         || '',      // C: 予約サイト
+    bookingType,               // D: 予約タイプ
+    r.bookingNo    || '',      // E: 予約番号
+    r.name         || '',      // F: 予約者名
+    r.kana         || '',      // G: フリガナ
+    r.date         || '',      // H: 予約日
+    r.time         || '',      // I: 予約時間
+    r.people       || '',      // J: 人数（合計）
+    r.peopleDetail || '',      // K: 人数内訳
+    r.amount       || '',      // L: 金額
+    r.payment      || '',      // M: 支払方法
+    r.email        || '',      // N: メールアドレス
+    r.phone        || '',      // O: 電話番号
+    r.notes        || '',      // P: 備考
+    instructorNeeded,          // Q: 追加インストラクター（必要/不要）
+    '',                        // R: 追加インストラクター担当
+    status,                    // S: ステータス
+    '',                        // T: 対応メモ
+    '',                        // U: カレンダーイベントID
+    msgId,                     // V: メッセージID
+    '',                        // W: LINE通知済み
   ]);
+
+  // 書き込んだ行番号を取得してLINE通知
+  const newRow     = sheet.getLastRow();
+  const notifyType = resolveLineNotifyType(bookingType, r, instructorNeeded);
+  if (notifyType) {
+    const rWithInstructor = Object.assign({}, r, { instructorNeeded, instructorName: '' });
+    const slotInfo = getSlotCapacity(sheet, r.date, r.time);
+    sendLineNotification(sheet, newRow, notifyType, rWithInstructor, slotInfo);
+  }
 }
 
 function updateRow(sheet, rowNum, r, msgId, subject, bookingType) {
@@ -550,21 +733,33 @@ function updateRow(sheet, rowNum, r, msgId, subject, bookingType) {
     [COLUMNS.STATUS]:       newStatus,
     [COLUMNS.MESSAGE_ID]:   msgId,
   };
-  if (r.name)         updates[COLUMNS.NAME]             = r.name;
-  if (r.kana)         updates[COLUMNS.KANA]             = r.kana;
-  if (r.date)         updates[COLUMNS.DATE]             = r.date;
-  if (r.time)         updates[COLUMNS.TIME]             = r.time;
-  if (r.people)       updates[COLUMNS.PEOPLE]           = r.people;
-  if (r.peopleDetail) updates[COLUMNS.PEOPLE_DETAIL]    = r.peopleDetail;
-  if (r.amount)       updates[COLUMNS.AMOUNT]           = r.amount;
-  if (r.payment)      updates[COLUMNS.PAYMENT]          = r.payment;
-  if (r.email)        updates[COLUMNS.EMAIL]            = r.email;
-  if (r.phone)        updates[COLUMNS.PHONE]            = r.phone;
-  if (r.people)       updates[COLUMNS.INSTRUCTOR_NEEDED] = resolveInstructor(r.people);
+  const instructorNeeded = resolveInstructor(r.people);
+  if (r.name)         updates[COLUMNS.NAME]              = r.name;
+  if (r.kana)         updates[COLUMNS.KANA]              = r.kana;
+  if (r.date)         updates[COLUMNS.DATE]              = r.date;
+  if (r.time)         updates[COLUMNS.TIME]              = r.time;
+  if (r.people)       updates[COLUMNS.PEOPLE]            = r.people;
+  if (r.peopleDetail) updates[COLUMNS.PEOPLE_DETAIL]     = r.peopleDetail;
+  if (r.amount)       updates[COLUMNS.AMOUNT]            = r.amount;
+  if (r.payment)      updates[COLUMNS.PAYMENT]           = r.payment;
+  if (r.email)        updates[COLUMNS.EMAIL]             = r.email;
+  if (r.phone)        updates[COLUMNS.PHONE]             = r.phone;
+  if (r.people)       updates[COLUMNS.INSTRUCTOR_NEEDED] = instructorNeeded;
 
   Object.entries(updates).forEach(([col, val]) => {
     sheet.getRange(rowNum, Number(col)).setValue(val);
   });
+
+  // 変更通知 or 新たに要対応になった場合のみ通知（同じ理由での重複防止はsendLineNotification内で管理）
+  const notifyType = resolveLineNotifyType(bookingType, r, instructorNeeded);
+  if (notifyType) {
+    const dateVal        = r.date || sheet.getRange(rowNum, COLUMNS.DATE).getValue();
+    const timeVal        = r.time || sheet.getRange(rowNum, COLUMNS.TIME).getValue();
+    const instructorName = sheet.getRange(rowNum, COLUMNS.INSTRUCTOR_NAME).getValue();
+    const rWithInstructor = Object.assign({}, r, { instructorNeeded, instructorName });
+    const slotInfo = getSlotCapacity(sheet, dateVal, timeVal);
+    sendLineNotification(sheet, rowNum, notifyType, rWithInstructor, slotInfo);
+  }
 }
 
 function getOrCreateSheet(ss) {
@@ -576,7 +771,7 @@ function getOrCreateSheet(ss) {
     '予約者名', 'フリガナ', '予約日', '予約時間', '人数',
     '人数内訳', '金額', '支払方法', 'メールアドレス', '電話番号',
     '備考', '追加インストラクター', '追加インストラクター担当',
-    'ステータス', '対応メモ', 'カレンダーイベントID', 'メッセージID',
+    'ステータス', '対応メモ', 'カレンダーイベントID', 'メッセージID', 'LINE通知済み',
   ];
 
   if (sheet.getRange(1, 1).getValue() !== '処理日時') {
@@ -591,6 +786,7 @@ function getOrCreateSheet(ss) {
     sheet.getRange(2, COLUMNS.STATUS, 1000, 1).setDataValidation(rule);
     sheet.hideColumns(COLUMNS.CALENDAR_ID_COL);
     sheet.hideColumns(COLUMNS.MESSAGE_ID);
+    sheet.hideColumns(COLUMNS.LINE_NOTIFIED);
   }
   return sheet;
 }
