@@ -115,6 +115,7 @@ function normalizeAllCSV() {
   Logger.log(`統合DB更新：追加${addCount}件、スキップ${skipCount}件`);
 
   updateMonthlyDashboard(ss);
+  updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
 }
 
@@ -144,6 +145,7 @@ function rebuildAll() {
   SpreadsheetApp.flush();
   Logger.log(`全件再構築：${records.length}件`);
   updateMonthlyDashboard(ss);
+  updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
 }
 
@@ -495,15 +497,15 @@ function updateMonthlyDashboard(ss) {
 
     const paxPerBooking  = m.bookings > 0 ? (m.pax / m.bookings).toFixed(2) : '';
     const pricePerPax    = m.pax     > 0 ? Math.round(m.revenue / m.pax)   : '';
-    const commRate       = m.revenue > 0 ? (m.commissionAmt / (m.revenue + m.commissionAmt)).toFixed(3) : '';
+    const commRate       = m.revenue > 0 ? (m.commissionAmt / (m.revenue + m.commissionAmt)) : '';
 
     rows.push([
       ym,
       m.bookings, m.pax, m.revenue,
       tgt.bookings || '', tgt.pax || '', tgt.revenue || '',
-      tgt.bookings ? (m.bookings / tgt.bookings).toFixed(3) : '',
-      tgt.pax      ? (m.pax      / tgt.pax     ).toFixed(3) : '',
-      tgt.revenue  ? (m.revenue  / tgt.revenue ).toFixed(3) : '',
+      tgt.bookings ? (m.bookings / tgt.bookings) : '',
+      tgt.pax      ? (m.pax      / tgt.pax     ) : '',
+      tgt.revenue  ? (m.revenue  / tgt.revenue ) : '',
       paxPerBooking, pricePerPax,
       m.commissionAmt, commRate,
       (ch['AJ']        || {}).bookings || 0, (ch['AJ']        || {}).revenue || 0,
@@ -521,7 +523,115 @@ function updateMonthlyDashboard(ss) {
     .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
   dashSheet.setFrozenRows(1);
 
+  // 達成率列（H,I,J = 8,9,10）をパーセント書式に設定
+  if (rows.length > 1) {
+    const dataRows = rows.length - 1;
+    dashSheet.getRange(2, 8, dataRows, 3).setNumberFormat('0.0%');
+    // 手数料率列（N=14）もパーセント
+    dashSheet.getRange(2, 14, dataRows, 1).setNumberFormat('0.0%');
+    // 売上系列は整数カンマ区切り
+    const revCols = [4, 6, 13, 16, 18, 20, 22, 24];
+    revCols.forEach(c => dashSheet.getRange(2, c, dataRows, 1).setNumberFormat('#,##0'));
+    // 達成率に色付け（100%以上=緑、80%未満=赤）
+    for (let r = 2; r <= rows.length; r++) {
+      [8, 9, 10].forEach(c => {
+        const cell = dashSheet.getRange(r, c);
+        const v = cell.getValue();
+        if (typeof v !== 'number' || v === 0) return;
+        if (v >= 1.0)   cell.setBackground('#b6d7a8');
+        else if (v < 0.8) cell.setBackground('#f4cccc');
+        else              cell.setBackground('#fff2cc');
+      });
+    }
+  }
+
   Logger.log('月次ダッシュボード更新完了');
+}
+
+// ============================================================
+// 日次ダッシュボード更新
+// ============================================================
+function updateDailyDashboard(ss) {
+  const dbSheet   = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.UNIFIED_DB);
+  const dashSheet = ss.getSheetByName(ANALYTICS_CONFIG.SHEETS.DAILY_DASH);
+  if (!dashSheet) return;
+
+  const dbData = dbSheet.getDataRange().getValues();
+
+  // 日別集計
+  const daily = {};
+  for (let i = 1; i < dbData.length; i++) {
+    const row    = dbData[i];
+    const status = row[DB.STATUS - 1];
+    if (status === 'cancelled') continue;
+
+    const dateVal = row[DB.ACTIVITY_DATE - 1];
+    if (!dateVal) continue;
+    const d = dateVal instanceof Date ? dateVal : new Date(dateVal);
+    if (isNaN(d.getTime())) continue;
+
+    const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const dow     = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()];
+    const ch      = row[DB.CHANNEL - 1];
+
+    if (!daily[dateKey]) {
+      daily[dateKey] = { date: d, dow, bookings: 0, pax: 0, revenue: 0, pets: 0, channels: {} };
+    }
+    daily[dateKey].bookings++;
+    daily[dateKey].pax     += Number(row[DB.PAX_TOTAL - 1])   || 0;
+    daily[dateKey].revenue += Number(row[DB.REVENUE_NET - 1]) || 0;
+    daily[dateKey].pets    += Number(row[DB.PAX_PET - 1])     || 0;
+    if (!daily[dateKey].channels[ch]) daily[dateKey].channels[ch] = 0;
+    daily[dateKey].channels[ch]++;
+  }
+
+  const headers = [
+    '参加日', '曜日', '予約件数', '参加人数', '売上(net)',
+    '1予約あたり人数', '1人あたり単価',
+    'ペット同伴数',
+    'AJ', 'じゃらん', 'アソビュー', 'Web予約', '直接・その他',
+  ];
+
+  const rows = [headers];
+  Object.keys(daily).sort().forEach(dk => {
+    const m   = daily[dk];
+    const ch  = m.channels;
+    const pap = m.bookings > 0 ? (m.pax / m.bookings).toFixed(1) : '';
+    const upp = m.pax      > 0 ? Math.round(m.revenue / m.pax)   : '';
+    const direct = (ch['直接'] || 0) + (ch['ライン'] || 0) + (ch['インスタ'] || 0) + (ch['GO OUT'] || 0);
+    rows.push([
+      m.date, m.dow,
+      m.bookings, m.pax, m.revenue,
+      pap, upp, m.pets,
+      ch['AJ']        || 0,
+      ch['じゃらん']   || 0,
+      ch['アソビュー'] || 0,
+      ch['Web予約']    || 0,
+      direct,
+    ]);
+  });
+
+  dashSheet.clearContents();
+  dashSheet.getRange(1, 1, rows.length, headers.length).setValues(rows);
+
+  // 書式設定
+  dashSheet.getRange(1, 1, 1, headers.length)
+    .setBackground('#4a86e8').setFontColor('#ffffff').setFontWeight('bold');
+  dashSheet.setFrozenRows(1);
+  if (rows.length > 1) {
+    const dr = rows.length - 1;
+    dashSheet.getRange(2, 1, dr, 1).setNumberFormat('yyyy/MM/dd');
+    dashSheet.getRange(2, 5, dr, 1).setNumberFormat('#,##0');
+    dashSheet.getRange(2, 7, dr, 1).setNumberFormat('#,##0');
+    // 土日に色付け
+    for (let r = 2; r <= rows.length; r++) {
+      const dow = dashSheet.getRange(r, 2).getValue();
+      if (dow === '土') dashSheet.getRange(r, 1, 1, headers.length).setBackground('#dae8fc');
+      if (dow === '日') dashSheet.getRange(r, 1, 1, headers.length).setBackground('#ffe6e6');
+    }
+  }
+
+  Logger.log('日次ダッシュボード更新完了');
 }
 
 // ============================================================
@@ -647,7 +757,7 @@ function updateCustomerAnalysis(ss) {
       ch, v.count, v.revenue,
       v.count > 0 ? Math.round(v.revenue / v.count) : 0,
       v.pax   > 0 ? Math.round(v.revenue / v.pax)   : 0,
-      gross   > 0 ? (v.commission / gross).toFixed(3) : 0,
+      gross   > 0 ? (v.commission / gross) : 0,
     ]]);
     writeRow++;
   });
@@ -704,7 +814,85 @@ function updateCustomerAnalysis(ss) {
     writeRow++;
   });
 
+  // グラフを追加（既存グラフを一旦削除）
+  sheet.getCharts().forEach(c => sheet.removeChart(c));
+  addCustomerCharts_(sheet, writeRow);
+
   Logger.log('顧客分析シート更新完了');
+}
+
+// 顧客分析シートにグラフを追加
+function addCustomerCharts_(sheet, lastDataRow) {
+  // データの位置を再スキャンしてグラフ用の範囲を特定
+  const data = sheet.getRange(1, 1, lastDataRow, 6).getValues();
+
+  let leadStart = -1, leadEnd = -1;
+  let groupStart = -1, groupEnd = -1;
+  let channelStart = -1, channelEnd = -1;
+
+  for (let i = 0; i < data.length; i++) {
+    const v = String(data[i][0]);
+    if (v === '■ リードタイム分布（予約〜参加日数）') leadStart = i + 2; // ヘッダー行の次
+    if (v === '■ グループ属性別 集計')               groupStart = i + 2;
+    if (v === '■ チャネル別KPI')                     channelStart = i + 2;
+    // 各セクションの終端（次のセクションタイトル or 空行2つ）
+    if (leadStart > 0 && leadEnd < 0 && i > leadStart && (v.startsWith('■') || (v === '' && String(data[i+1] ? data[i+1][0] : '') === '')))
+      leadEnd = i;
+    if (groupStart > 0 && groupEnd < 0 && i > groupStart && (v.startsWith('■') || (v === '' && String(data[i+1] ? data[i+1][0] : '') === '')))
+      groupEnd = i;
+    if (channelStart > 0 && channelEnd < 0 && i > channelStart && (v.startsWith('■') || (v === '' && String(data[i+1] ? data[i+1][0] : '') === '')))
+      channelEnd = i;
+  }
+  if (leadEnd < 0)    leadEnd    = lastDataRow;
+  if (groupEnd < 0)   groupEnd   = lastDataRow;
+  if (channelEnd < 0) channelEnd = lastDataRow;
+
+  const addChart = (dataRange, type, title, anchorRow, anchorCol) => {
+    try {
+      const chart = sheet.newChart()
+        .setChartType(type)
+        .addRange(dataRange)
+        .setOption('title', title)
+        .setOption('legend', { position: 'right' })
+        .setOption('width', 480)
+        .setOption('height', 300)
+        .setPosition(anchorRow, anchorCol, 0, 0)
+        .build();
+      sheet.insertChart(chart);
+    } catch(e) {
+      Logger.log('グラフ追加エラー: ' + e.message);
+    }
+  };
+
+  // リードタイム分布：棒グラフ（列E付近に配置）
+  if (leadStart > 0 && leadEnd > leadStart) {
+    addChart(
+      sheet.getRange(leadStart, 1, leadEnd - leadStart, 2),
+      Charts.ChartType.BAR,
+      'リードタイム分布',
+      leadStart, 4
+    );
+  }
+
+  // グループ属性別：円グラフ
+  if (groupStart > 0 && groupEnd > groupStart) {
+    addChart(
+      sheet.getRange(groupStart, 1, groupEnd - groupStart, 2),
+      Charts.ChartType.PIE,
+      'グループ属性別 件数',
+      groupStart, 4
+    );
+  }
+
+  // チャネル別KPI：棒グラフ（件数と売上）
+  if (channelStart > 0 && channelEnd > channelStart) {
+    addChart(
+      sheet.getRange(channelStart, 1, channelEnd - channelStart, 3),
+      Charts.ChartType.COLUMN,
+      'チャネル別 件数・売上',
+      channelStart, 4
+    );
+  }
 }
 
 // ============================================================
@@ -1011,6 +1199,7 @@ function onEdit_Analytics(e) {
 function updateDashboardOnly() {
   const ss = getAnalyticsSS();
   updateMonthlyDashboard(ss);
+  updateDailyDashboard(ss);
   updateCustomerAnalysis(ss);
   Logger.log('ダッシュボード更新完了');
 }
