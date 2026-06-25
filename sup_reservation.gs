@@ -21,7 +21,7 @@ const CONFIG = {
     + ')',
 };
 
-const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定'];
+const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定', '予約を確定しました', '予約申込みが入りました'];
 const TENTATIVE_KEYWORDS  = ['仮予約', '予約のリクエスト'];
 const CANCEL_KEYWORDS     = ['キャンセル通知', 'キャンセルされました', 'キャンセルのご連絡', '予約取消'];
 const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
@@ -489,6 +489,7 @@ function parseEmail(message) {
   if (from.includes('activityboard.jp'))              return parseJalan(subject, body);
   if (from.includes('mailsender@asoview'))            return parseAsoview(subject, body);
   if (from.includes('reserve-system@activityjapan')) return parseActivityJapan(subject, body);
+  if (from.includes('urkt.in'))                      return parseUrkt(subject, body);
   return null;
 }
 
@@ -570,6 +571,41 @@ function parseActivityJapan(subject, body) {
     email:        extract(body, [/メール[：:]\s*([\w.\-]+@[\w.\-]+)/]),
     phone:        extract(body, [/電話番号[：:]\s*([\d\-\+]+)/]),
     notes:        extract(body, [/備考[：:]\s*(.+)/]),
+  };
+}
+
+// ============================================================
+// ウラカタ (GoRETREAT / urkt.in)
+// ============================================================
+function parseUrkt(subject, body) {
+  // 予約日：2026年08月14日(金)
+  const dateMatch = body.match(/予約日[　\s]*[：:]\s*(\d{4})年(\d{1,2})月(\d{1,2})日/);
+  // 開始時間：13:30
+  const timeMatch = body.match(/開始時間[　\s]*[：:]\s*(\d{1,2}:\d{2})/);
+  // 合計：6
+  const peopleMatch = body.match(/合計[　\s]*[：:]\s*(\d+)/);
+  // 料金詳細：大人：8,500 円 × 6
+  const peopleLines = [...body.matchAll(/([^\n：:]+)[：:]\s*([\d,]+)\s*円\s*[×x]\s*(\d+)/g)];
+  const peopleDetail = peopleLines.map(m => `${m[1].trim()}×${m[3]}名`).join('・');
+  // 合計料金：51,000 円
+  const amountMatch = body.match(/合計料金[　\s]*[：:]\s*([\d,]+\s*円)/);
+  // 予約ID
+  const bookingNoMatch = body.match(/予約ID[　\s]*[：:]\s*(\d+)/);
+
+  return {
+    site:         'ウラカタ',
+    bookingNo:    bookingNoMatch ? bookingNoMatch[1] : extract(subject, [/予約ID[：:]\s*(\d+)/]),
+    name:         extract(body, [/氏名[　\s]*[：:]\s*([^\r\n]+)/]),
+    kana:         extract(body, [/フリガナ[　\s]*[：:]\s*([^\r\n]+)/]),
+    date:         dateMatch ? `${dateMatch[1]}/${dateMatch[2]}/${dateMatch[3]}` : '',
+    time:         timeMatch ? timeMatch[1] : '',
+    people:       peopleMatch ? peopleMatch[1] : '',
+    peopleDetail: peopleDetail,
+    amount:       amountMatch ? amountMatch[1].trim() : '',
+    payment:      extract(body, [/支払い方法[　\s]*[：:]\s*([^\r\n]+)/]),
+    email:        extract(body, [/メール[　\s]*[：:]\s*([\w.\-]+@[\w.\-]+)/]),
+    phone:        extract(body, [/電話番号[　\s]*[：:]\s*([\d\-\+]+)/]),
+    notes:        extract(body, [/備考[　\s]*[：:]\s*([^\r\n]+)/]),
   };
 }
 
