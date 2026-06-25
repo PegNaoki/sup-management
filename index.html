@@ -3,427 +3,258 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ストップウォッチ</title>
+  <title>近くの図書館を探す</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@300;400;700&display=swap');
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
+      font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', sans-serif;
+      background: #f0f4f8;
+      color: #333;
       min-height: 100vh;
+    }
+    header {
+      background: #2563eb;
+      color: white;
+      padding: 1.5rem 1rem;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    header h1 { font-size: 1.6rem; margin-bottom: 0.3rem; }
+    header p { font-size: 0.9rem; opacity: 0.85; }
+    .container { max-width: 800px; margin: 0 auto; padding: 1.5rem 1rem; }
+    .search-box {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      margin-bottom: 1.5rem;
+    }
+    .input-row {
       display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #080810;
-      font-family: 'Inter', sans-serif;
-      overflow: hidden;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
     }
-
-    /* Ambient glow background */
-    body::before {
-      content: '';
-      position: fixed;
-      top: 20%;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 600px;
-      height: 600px;
-      background: radial-gradient(ellipse, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
-      pointer-events: none;
-    }
-
-    .card {
-      position: relative;
-      background: linear-gradient(145deg, #13131f, #0d0d18);
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 32px;
-      padding: 48px 56px 40px;
-      width: 480px;
-      box-shadow:
-        0 0 0 1px rgba(99,102,241,0.1),
-        0 40px 80px rgba(0,0,0,0.6),
-        inset 0 1px 0 rgba(255,255,255,0.05);
-    }
-
-    .card-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 40px;
-    }
-
-    .title {
-      font-size: 0.7rem;
-      font-weight: 600;
-      letter-spacing: 0.25em;
-      text-transform: uppercase;
-      color: rgba(255,255,255,0.3);
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #374151;
-      transition: background 0.3s, box-shadow 0.3s;
-    }
-
-    .status-dot.running {
-      background: #22c55e;
-      box-shadow: 0 0 12px rgba(34,197,94,0.6);
-      animation: pulse-dot 1.5s infinite;
-    }
-
-    @keyframes pulse-dot {
-      0%, 100% { box-shadow: 0 0 8px rgba(34,197,94,0.6); }
-      50% { box-shadow: 0 0 20px rgba(34,197,94,0.9); }
-    }
-
-    /* Ring display */
-    .ring-wrapper {
-      display: flex;
-      justify-content: center;
-      margin-bottom: 40px;
-      position: relative;
-    }
-
-    .ring-svg {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 260px;
-      height: 260px;
-    }
-
-    .ring-bg {
-      fill: none;
-      stroke: rgba(255,255,255,0.04);
-      stroke-width: 3;
-    }
-
-    .ring-progress {
-      fill: none;
-      stroke: url(#ringGradient);
-      stroke-width: 3;
-      stroke-linecap: round;
-      stroke-dasharray: 754;
-      stroke-dashoffset: 754;
-      transition: stroke-dashoffset 0.1s linear;
-      transform: rotate(-90deg);
-      transform-origin: center;
-    }
-
-    .display-wrapper {
-      width: 220px;
-      height: 220px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .display-main {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 4rem;
-      font-weight: 300;
-      color: #ffffff;
-      letter-spacing: -0.02em;
-      line-height: 1;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .display-ms {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 1.4rem;
-      font-weight: 300;
-      color: rgba(255,255,255,0.35);
-      letter-spacing: 0.05em;
-      margin-top: 6px;
-    }
-
-    /* Buttons */
-    .buttons {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      margin-bottom: 28px;
-    }
-
-    .btn {
-      position: relative;
-      padding: 14px 0;
-      font-family: 'Inter', sans-serif;
-      font-size: 0.8rem;
-      font-weight: 600;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      border: none;
-      border-radius: 14px;
-      cursor: pointer;
-      transition: transform 0.15s, opacity 0.2s, box-shadow 0.2s;
-      overflow: hidden;
-    }
-
-    .btn::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: rgba(255,255,255,0.07);
-      opacity: 0;
-      transition: opacity 0.15s;
-    }
-
-    .btn:hover::before { opacity: 1; }
-    .btn:active { transform: scale(0.97); }
-
-    .btn:disabled {
-      opacity: 0.25;
-      cursor: default;
-    }
-    .btn:disabled::before { display: none; }
-
-    .btn-start {
-      background: linear-gradient(135deg, #22c55e, #16a34a);
-      color: #000;
-      box-shadow: 0 4px 20px rgba(34,197,94,0.3);
-    }
-
-    .btn-stop {
-      background: linear-gradient(135deg, #ef4444, #dc2626);
-      color: #fff;
-      box-shadow: 0 4px 20px rgba(239,68,68,0.3);
-    }
-
-    .btn-lap {
-      background: linear-gradient(135deg, #6366f1, #4f46e5);
-      color: #fff;
-      box-shadow: 0 4px 20px rgba(99,102,241,0.3);
-    }
-
-    .btn-reset {
-      background: rgba(255,255,255,0.06);
-      color: rgba(255,255,255,0.5);
-      border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: none;
-    }
-
-    /* Lap list */
-    .laps-header {
-      display: flex;
-      justify-content: space-between;
-      padding: 0 4px 8px;
-      font-size: 0.65rem;
-      font-weight: 600;
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
-      color: rgba(255,255,255,0.2);
-    }
-
-    .laps {
-      max-height: 180px;
-      overflow-y: auto;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(255,255,255,0.08) transparent;
-    }
-
-    .laps::-webkit-scrollbar { width: 3px; }
-    .laps::-webkit-scrollbar-track { background: transparent; }
-    .laps::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
-
-    .lap-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 4px;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
-      animation: lap-in 0.2s ease;
-    }
-
-    @keyframes lap-in {
-      from { opacity: 0; transform: translateY(-6px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    .lap-num {
-      font-size: 0.75rem;
-      color: rgba(255,255,255,0.25);
-      font-weight: 500;
-      min-width: 48px;
-    }
-
-    .lap-bar {
+    input[type="text"] {
       flex: 1;
-      height: 2px;
-      background: rgba(255,255,255,0.05);
-      border-radius: 1px;
-      margin: 0 12px;
-      overflow: hidden;
+      min-width: 180px;
+      padding: 0.6rem 0.8rem;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 1rem;
     }
-
-    .lap-bar-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #6366f1, #22c55e);
-      border-radius: 1px;
+    input[type="text"]:focus { outline: none; border-color: #2563eb; }
+    button {
+      padding: 0.6rem 1.2rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.2s;
     }
-
-    .lap-time {
-      font-family: 'JetBrains Mono', monospace;
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-secondary { background: #10b981; color: white; }
+    .btn-secondary:hover { background: #059669; }
+    .btn-primary:disabled, .btn-secondary:disabled { background: #9ca3af; cursor: not-allowed; }
+    .api-key-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
       font-size: 0.85rem;
-      font-weight: 400;
-      color: rgba(255,255,255,0.7);
-      font-variant-numeric: tabular-nums;
+      color: #6b7280;
     }
-
-    .lap-item.fastest .lap-time { color: #22c55e; }
-    .lap-item.slowest .lap-time  { color: #f87171; }
+    .api-key-row input { flex: 1; }
+    .note {
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin-top: 0.4rem;
+    }
+    #status {
+      text-align: center;
+      padding: 1rem;
+      color: #6b7280;
+      font-size: 0.95rem;
+    }
+    .library-list { display: flex; flex-direction: column; gap: 1rem; }
+    .library-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.2rem 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+    }
+    .library-info h2 { font-size: 1.05rem; margin-bottom: 0.3rem; color: #1e40af; }
+    .library-info .address { font-size: 0.85rem; color: #6b7280; margin-bottom: 0.2rem; }
+    .library-info .tel { font-size: 0.85rem; color: #374151; }
+    .library-info .url { font-size: 0.8rem; }
+    .library-info .url a { color: #2563eb; text-decoration: none; }
+    .library-info .url a:hover { text-decoration: underline; }
+    .distance-badge {
+      background: #eff6ff;
+      color: #1d4ed8;
+      border-radius: 8px;
+      padding: 0.3rem 0.7rem;
+      font-size: 0.85rem;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .error { color: #dc2626; background: #fef2f2; border-radius: 8px; padding: 1rem; margin-top: 0.5rem; }
+    .spinner {
+      display: inline-block;
+      width: 20px; height: 20px;
+      border: 3px solid #d1d5db;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="card-header">
-      <span class="title">Stopwatch</span>
-      <div class="status-dot" id="statusDot"></div>
-    </div>
-
-    <div class="ring-wrapper">
-      <svg class="ring-svg" viewBox="0 0 260 260">
-        <defs>
-          <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="#6366f1"/>
-            <stop offset="100%" stop-color="#22c55e"/>
-          </linearGradient>
-        </defs>
-        <circle class="ring-bg" cx="130" cy="130" r="120"/>
-        <circle class="ring-progress" id="ringProgress" cx="130" cy="130" r="120"/>
-      </svg>
-      <div class="display-wrapper">
-        <div class="display-main" id="time">00:00</div>
-        <div class="display-ms" id="ms">.00</div>
+  <header>
+    <h1>📚 近くの図書館を探す</h1>
+    <p>現在地または都道府県・市区町村から近くの図書館を検索します</p>
+  </header>
+  <div class="container">
+    <div class="search-box">
+      <div class="api-key-row">
+        <label for="appkey">CALILアプリキー:</label>
+        <input type="text" id="appkey" placeholder="アプリキーを入力" />
+      </div>
+      <p class="note">※ <a href="https://calil.jp/api/dashboard/" target="_blank">CALIL</a> でアプリキーを取得してください（無料）</p>
+      <hr style="margin: 1rem 0; border: none; border-top: 1px solid #e5e7eb;">
+      <div class="input-row">
+        <input type="text" id="pref" placeholder="都道府県（例: 東京都）" />
+        <input type="text" id="city" placeholder="市区町村（例: 渋谷区）」" />
+        <button class="btn-primary" onclick="searchByCity()">🔍 地名で検索</button>
+      </div>
+      <div style="text-align: center; color: #9ca3af; margin-bottom: 0.8rem;">— または —</div>
+      <div style="text-align: center;">
+        <button class="btn-secondary" onclick="searchByLocation()">📍 現在地から検索</button>
       </div>
     </div>
-
-    <div class="buttons">
-      <button class="btn btn-start" id="btn-start">Start</button>
-      <button class="btn btn-stop"  id="btn-stop"  disabled>Stop</button>
-      <button class="btn btn-lap"   id="btn-lap"   disabled>Lap</button>
-      <button class="btn btn-reset" id="btn-reset">Reset</button>
-    </div>
-
-    <div class="laps-header">
-      <span>Lap</span>
-      <span>Time</span>
-    </div>
-    <div class="laps" id="laps"></div>
+    <div id="status"></div>
+    <div id="results" class="library-list"></div>
   </div>
 
   <script>
-    let startTime = 0, elapsed = 0, rafId = null;
-    let lapCount = 0, lapStart = 0;
-    let lapTimes = [];
+    const CALIL_BASE = 'https://api.calil.jp/library';
 
-    const timeEl   = document.getElementById('time');
-    const msEl     = document.getElementById('ms');
-    const lapsEl   = document.getElementById('laps');
-    const dot      = document.getElementById('statusDot');
-    const ring     = document.getElementById('ringProgress');
-    const btnStart = document.getElementById('btn-start');
-    const btnStop  = document.getElementById('btn-stop');
-    const btnReset = document.getElementById('btn-reset');
-    const btnLap   = document.getElementById('btn-lap');
-
-    const RING_CIRC = 2 * Math.PI * 120;
-    const RING_CYCLE = 60000; // 1 minute = full ring
-
-    function format(ms) {
-      const totalSec = Math.floor(ms / 1000);
-      const min = Math.floor(totalSec / 60).toString().padStart(2, '0');
-      const sec = (totalSec % 60).toString().padStart(2, '0');
-      const cs  = Math.floor((ms % 1000) / 10).toString().padStart(2, '0');
-      return { main: `${min}:${sec}`, cs };
+    function getAppKey() {
+      const key = document.getElementById('appkey').value.trim();
+      // テスト用デモキー（本番では自分のキーを使用）
+      return key || 'demo';
     }
 
-    function updateRing(ms) {
-      const progress = (ms % RING_CYCLE) / RING_CYCLE;
-      ring.style.strokeDashoffset = RING_CIRC * (1 - progress);
+    function setStatus(msg, isLoading = false) {
+      document.getElementById('status').innerHTML =
+        (isLoading ? '<span class="spinner"></span>' : '') + msg;
     }
 
-    function tick() {
-      elapsed = Date.now() - startTime;
-      const { main, cs } = format(elapsed);
-      timeEl.textContent = main;
-      msEl.textContent   = '.' + cs;
-      updateRing(elapsed);
-      rafId = requestAnimationFrame(tick);
+    function setError(msg) {
+      document.getElementById('results').innerHTML = `<div class="error">⚠️ ${msg}</div>`;
+      setStatus('');
     }
 
-    function renderLaps() {
-      if (!lapTimes.length) { lapsEl.innerHTML = ''; return; }
-      const min = Math.min(...lapTimes);
-      const max = Math.max(...lapTimes);
-      const maxT = max || 1;
-      lapsEl.innerHTML = lapTimes.map((t, i) => {
-        const { main, cs } = format(t);
-        const cls = lapTimes.length > 1
-          ? (t === min ? 'fastest' : t === max ? 'slowest' : '')
-          : '';
-        const pct = (t / maxT * 100).toFixed(1);
-        return `<div class="lap-item ${cls}">
-          <span class="lap-num">Lap ${lapTimes.length - i}</span>
-          <div class="lap-bar"><div class="lap-bar-fill" style="width:${pct}%"></div></div>
-          <span class="lap-time">${main}.${cs}</span>
-        </div>`;
+    function searchByCity() {
+      const pref = document.getElementById('pref').value.trim();
+      const city = document.getElementById('city').value.trim();
+      if (!pref && !city) { setError('都道府県または市区町村を入力してください'); return; }
+      fetchLibraries({ pref, city });
+    }
+
+    function searchByLocation() {
+      if (!navigator.geolocation) { setError('このブラウザは位置情報に対応していません'); return; }
+      setStatus('位置情報を取得中...', true);
+      navigator.geolocation.getCurrentPosition(
+        pos => fetchLibraries({ geocode: `${pos.coords.longitude},${pos.coords.latitude}` }),
+        err => setError('位置情報の取得に失敗しました: ' + err.message)
+      );
+    }
+
+    function fetchLibraries(params) {
+      setStatus('図書館を検索中...', true);
+      document.getElementById('results').innerHTML = '';
+
+      const appkey = getAppKey();
+      const qs = new URLSearchParams({ appkey, limit: 20, ...params });
+      const url = `${CALIL_BASE}?${qs}`;
+
+      // JSONP で取得（CORS対応）
+      const cbName = 'calilCallback_' + Date.now();
+      const script = document.createElement('script');
+      let done = false;
+
+      const timer = setTimeout(() => {
+        if (!done) { done = true; cleanup(); setError('タイムアウトしました。もう一度お試しください。'); }
+      }, 10000);
+
+      window[cbName] = function(data) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        cleanup();
+        renderLibraries(data, params.geocode);
+      };
+
+      function cleanup() {
+        delete window[cbName];
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+
+      script.src = url + `&callback=${cbName}`;
+      script.onerror = () => { if (!done) { done = true; clearTimeout(timer); cleanup(); setError('APIの呼び出しに失敗しました。アプリキーを確認してください。'); } };
+      document.head.appendChild(script);
+    }
+
+    function calcDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function renderLibraries(data, geocode) {
+      const list = document.getElementById('results');
+      if (!data || data.length === 0) {
+        setStatus('図書館が見つかりませんでした');
+        return;
+      }
+      setStatus(`${data.length}件の図書館が見つかりました`);
+
+      let userLat, userLon;
+      if (geocode) {
+        const parts = geocode.split(',');
+        userLon = parseFloat(parts[0]);
+        userLat = parseFloat(parts[1]);
+      }
+
+      list.innerHTML = data.map(lib => {
+        let distHtml = '';
+        if (userLat && lib.geocode) {
+          const [libLon, libLat] = lib.geocode.split(',').map(Number);
+          const km = calcDistance(userLat, userLon, libLat, libLon);
+          distHtml = `<div class="distance-badge">${km < 1 ? (km*1000).toFixed(0)+'m' : km.toFixed(1)+'km'}</div>`;
+        }
+        return `
+          <div class="library-card">
+            <div class="library-info">
+              <h2>${lib.formal || lib.short || '（名称不明）'}</h2>
+              ${lib.address ? `<div class="address">📍 ${lib.address}</div>` : ''}
+              ${lib.tel ? `<div class="tel">📞 ${lib.tel}</div>` : ''}
+              ${lib.url ? `<div class="url"><a href="${lib.url}" target="_blank">🔗 公式サイト</a></div>` : ''}
+            </div>
+            ${distHtml}
+          </div>`;
       }).join('');
     }
-
-    btnStart.addEventListener('click', () => {
-      startTime = Date.now() - elapsed;
-      if (!lapStart) lapStart = startTime;
-      rafId = requestAnimationFrame(tick);
-      dot.classList.add('running');
-      btnStart.disabled = true;
-      btnStop.disabled  = false;
-      btnLap.disabled   = false;
-      btnStart.textContent = 'Start';
-    });
-
-    btnStop.addEventListener('click', () => {
-      cancelAnimationFrame(rafId);
-      dot.classList.remove('running');
-      btnStop.disabled  = true;
-      btnLap.disabled   = true;
-      btnStart.disabled = false;
-      btnStart.textContent = 'Resume';
-    });
-
-    btnReset.addEventListener('click', () => {
-      cancelAnimationFrame(rafId);
-      elapsed = lapCount = lapStart = 0;
-      lapTimes = [];
-      timeEl.textContent = '00:00';
-      msEl.textContent   = '.00';
-      ring.style.strokeDashoffset = RING_CIRC;
-      dot.classList.remove('running');
-      btnStart.disabled = false;
-      btnStart.textContent = 'Start';
-      btnStop.disabled  = true;
-      btnLap.disabled   = true;
-      renderLaps();
-    });
-
-    btnLap.addEventListener('click', () => {
-      lapCount++;
-      const now = Date.now();
-      lapTimes.unshift(now - lapStart);
-      lapStart = now;
-      renderLaps();
-    });
-
-    ring.style.strokeDashoffset = RING_CIRC;
   </script>
 </body>
 </html>
