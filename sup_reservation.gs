@@ -13,11 +13,12 @@ const CONFIG = {
   MORNING_LIMIT:   8,  // 午前枠（～12:00）の上限
   AFTERNOON_LIMIT: 8,  // 午後枠（12:00～）の上限
 
-  SEARCH_QUERY: 'in:anywhere (SUP OR サップ) ('
+  SEARCH_QUERY: 'in:anywhere ('
     + 'from:reservation@activityboard.jp'
     + ' OR from:reservation_request@activityboard.jp'
     + ' OR from:mailsender@asoview.com'
     + ' OR from:reserve-system@activityjapan.com'
+    + ' OR from:info@urkt.in'
     + ')',
 };
 
@@ -63,6 +64,44 @@ function importReservationEmails() {
 
 function importAllHistoricalEmails() {
   importEmails_(500);
+}
+
+// ウラカタ（GoRETREAT）の過去メールをまとめて取り込む
+function importUrktHistoricalEmails() {
+  const ss      = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet   = getOrCreateSheet(ss);
+  const label   = getOrCreateLabel(CONFIG.PROCESSED_LABEL);
+  const threads = GmailApp.search('from:info@urkt.in', 0, 500);
+  const existing = loadExistingReservations(sheet);
+
+  let newCount = 0, skipCount = 0;
+
+  threads.forEach(thread => {
+    thread.getMessages().forEach(message => {
+      const msgId = message.getId();
+      if (existing.byMsgId.has(msgId)) { skipCount++; return; }
+
+      const subject     = message.getSubject();
+      const bookingType = detectBookingType(subject);
+      const r           = parseEmail(message);
+      if (!r) return;
+
+      const existingRow = r.bookingNo ? existing.byBookingNo.get(r.bookingNo) : null;
+
+      if (bookingType === 'キャンセル') {
+        if (existingRow) handleCancellation(sheet, existingRow, msgId, subject);
+      } else if (existingRow) {
+        updateRow(sheet, existingRow, r, msgId, subject, bookingType);
+      } else {
+        appendToSheet(sheet, r, msgId, subject, bookingType);
+        newCount++;
+      }
+    });
+    thread.addLabel(label);
+  });
+
+  SpreadsheetApp.flush();
+  Logger.log(`ウラカタ取込完了：新規${newCount}件・スキップ${skipCount}件（対象${threads.length}スレッド）`);
 }
 
 function importEmails_(limit) {
