@@ -558,6 +558,14 @@ function notifySlotReduction_(r) {
     return;
   }
 
+  // 二重減算防止：同一予約・同一枠・同一減算の dispatch は一度だけ
+  // 変更で枠/人数が変われば key も変わるため、正当な調整はブロックしない
+  const dedupKey = [r.site || '', r.bookingNo || '', slotDate, slotTime, `-${people}`].join('|');
+  if (isSlotSynced_(dedupKey)) {
+    Logger.log(`在庫連携スキップ：処理済み (${dedupKey})`);
+    return;
+  }
+
   try {
     const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
       method: 'post',
@@ -574,12 +582,14 @@ function notifySlotReduction_(r) {
           slot_decrement: String(people),
           dry_run:        props.getProperty('SLOT_SYNC_DRY_RUN') || 'true',
           source_site:    r.site || '',
+          dedup_key:      dedupKey,
         },
       }),
       muteHttpExceptions: true,
     });
     const code = res.getResponseCode();
     if (code === 204) {
+      markSlotSynced_(dedupKey);   // 成功時のみ記録（失敗時は次回再試行される）
       Logger.log(`在庫連携：GitHub Actions に通知 (${slotDate} ${slotTime} -${people})`);
     } else {
       Logger.log(`在庫連携エラー (${code}): ${res.getContentText()}`);
@@ -587,6 +597,27 @@ function notifySlotReduction_(r) {
   } catch (e) {
     Logger.log(`在庫連携エラー: ${e.message}`);
   }
+}
+
+// 在庫連携の処理済みキー管理（スクリプトプロパティに直近N件を保持）
+const SLOT_SYNCED_PROP = 'SLOT_SYNCED_KEYS';
+const SLOT_SYNCED_MAX  = 500;
+
+function loadSyncedKeys_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(SLOT_SYNCED_PROP);
+  if (!raw) return [];
+  try { return JSON.parse(raw); } catch (e) { return []; }
+}
+function isSlotSynced_(key) {
+  return loadSyncedKeys_().indexOf(key) !== -1;
+}
+function markSlotSynced_(key) {
+  const keys = loadSyncedKeys_();
+  if (keys.indexOf(key) !== -1) return;
+  keys.push(key);
+  // 上限を超えたら古いものから捨てる（直近N件のみ保持）
+  const trimmed = keys.slice(Math.max(0, keys.length - SLOT_SYNCED_MAX));
+  PropertiesService.getScriptProperties().setProperty(SLOT_SYNCED_PROP, JSON.stringify(trimmed));
 }
 
 // 予約日を YYYY-MM-DD に変換（"2026/8/14" "2026年08月14日" などに対応）
