@@ -1,0 +1,52 @@
+name: Reduce OTA Slot
+
+# GAS から repository_dispatch で呼び出される。
+# 予約が入ったとき、じゃらん(ACTIVITY BOARD)の該当枠を減らす。
+on:
+  repository_dispatch:
+    types: [reduce_slot]
+  # 手動テスト用（Actionsタブから実行可能）
+  workflow_dispatch:
+    inputs:
+      slot_date:      { description: "対象日 (YYYY-MM-DD)", required: true }
+      slot_time:      { description: "対象時間 (HH:MM)",    required: true }
+      slot_decrement: { description: "減らす人数",          required: true }
+      dry_run:        { description: "true=保存しない",     required: false, default: "true" }
+
+jobs:
+  reduce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: automation
+        run: npm install
+
+      - name: Install Chromium
+        working-directory: automation
+        run: npx playwright install --with-deps chromium
+
+      - name: Reduce slot (jalan)
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          SLOT_DATE:      ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
+          SLOT_TIME:      ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
+          SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement || github.event.inputs.slot_decrement }}
+          DRY_RUN:        ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
+          HEADLESS:       "true"
+        run: node reduce-jalan-slot.js
+
+      - name: Upload error screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshot
+          path: automation/error-screenshot.png
+          if-no-files-found: ignore

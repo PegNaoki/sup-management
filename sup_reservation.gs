@@ -139,6 +139,10 @@ function importEmails_(limit) {
         // 新規追加
         appendToSheet(sheet, r, msgId, subject, bookingType);
         newCount++;
+        // 新規確定予約 → 他OTAの枠を減らすよう GitHub Actions に通知
+        if (bookingType === '確定' || bookingType === '仮予約') {
+          notifySlotReduction_(r);
+        }
       }
     });
     thread.addLabel(label);
@@ -520,6 +524,82 @@ function checkCapacityWarningsManual() {
 // ============================================================
 // メール解析
 // ============================================================
+// ============================================================
+// 他OTAの在庫枠を減らすよう GitHub Actions に通知（repository_dispatch）
+// ------------------------------------------------------------
+// 必要なスクリプトプロパティ：
+//   GITHUB_TOKEN  : repo権限のPersonal Access Token
+//   GITHUB_REPO   : "PegNaoki/sup-management" のような owner/repo
+//   SLOT_SYNC_ENABLED : "true" のときだけ実行（既定は無効＝安全側）
+// ============================================================
+function notifySlotReduction_(r) {
+  const props   = PropertiesService.getScriptProperties();
+  if (props.getProperty('SLOT_SYNC_ENABLED') !== 'true') return; // 既定OFF
+
+  const token = props.getProperty('GITHUB_TOKEN');
+  const repo  = props.getProperty('GITHUB_REPO');
+  if (!token || !repo) {
+    Logger.log('在庫連携スキップ：GITHUB_TOKEN または GITHUB_REPO が未設定');
+    return;
+  }
+
+  // 日付を YYYY-MM-DD に正規化
+  const slotDate = normalizeSlotDate_(r.date);
+  const slotTime = String(r.time || '').trim();
+  const people   = parseInt(r.people, 10) || 0;
+  if (!slotDate || !slotTime || !people) {
+    Logger.log(`在庫連携スキップ：日時/人数が不完全 (date=${r.date}, time=${r.time}, people=${r.people})`);
+    return;
+  }
+
+  // じゃらん発の予約はじゃらん側を減らす必要がないため除外（自分のサイトは触らない）
+  if (r.site && r.site.includes('じゃらん')) {
+    Logger.log('在庫連携スキップ：じゃらん発の予約のためじゃらん枠は減算不要');
+    return;
+  }
+
+  try {
+    const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+      },
+      payload: JSON.stringify({
+        event_type: 'reduce_slot',
+        client_payload: {
+          slot_date:      slotDate,
+          slot_time:      slotTime,
+          slot_decrement: String(people),
+          dry_run:        props.getProperty('SLOT_SYNC_DRY_RUN') || 'true',
+          source_site:    r.site || '',
+        },
+      }),
+      muteHttpExceptions: true,
+    });
+    const code = res.getResponseCode();
+    if (code === 204) {
+      Logger.log(`在庫連携：GitHub Actions に通知 (${slotDate} ${slotTime} -${people})`);
+    } else {
+      Logger.log(`在庫連携エラー (${code}): ${res.getContentText()}`);
+    }
+  } catch (e) {
+    Logger.log(`在庫連携エラー: ${e.message}`);
+  }
+}
+
+// 予約日を YYYY-MM-DD に変換（"2026/8/14" "2026年08月14日" などに対応）
+function normalizeSlotDate_(dateVal) {
+  if (!dateVal) return '';
+  if (dateVal instanceof Date) {
+    return Utilities.formatDate(dateVal, 'Asia/Tokyo', 'yyyy-MM-dd');
+  }
+  const m = String(dateVal).match(/(\d{4})[\/\-年]\s*(\d{1,2})[\/\-月]\s*(\d{1,2})/);
+  if (!m) return '';
+  return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+}
+
 function parseEmail(message) {
   const from    = message.getFrom();
   const body    = message.getPlainBody();
