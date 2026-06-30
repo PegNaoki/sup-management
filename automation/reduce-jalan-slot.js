@@ -4,18 +4,24 @@
 // 他サイトで予約が入ったとき、じゃらん側の該当日時の在庫枠を減らす。
 // ログインは AirID 認証。枠は「マイナス」ボタンのクリックで即反映（保存不要）。
 //
-// 環境変数：
-//   JALAN_ID        : AirID または メールアドレス
-//   JALAN_PASSWORD  : パスワード
-//   SHOP_NAME       : 店舗名（既定: のみくい処 七ツ家）
-//   SLOT_DATE       : 対象日 (YYYY-MM-DD)
-//   SLOT_TIME       : 対象時間 (HH:MM)
-//   SLOT_DECREMENT  : 減らす人数 (例: 6)
-//   DRY_RUN         : "true" のとき実際のクリックは行わず確認のみ（既定: true）
-//   HEADLESS        : "false" でブラウザ表示（ローカルデバッグ用、既定: true）
+// 画面構造（重要）：
+//   - 「時間(行) × 日付(列)」のマトリクス
+//   - 各行は .time（"10:00 ～ 12:00"）で時間が分かる
+//   - 各行の .calendar ol > li（14日分）が日付の列
+//   - 各セルに .stock-cnt（残数）と .stepper-button-minus がある
+//   - セル自体に日付・時間の属性は無いため、行=時間・列=日付 で特定する
 //
-// ⚠️ 日付・時間枠を特定する部分（findSlotMinusButton）は、2回目の録画
-//    （特定日付・特定時間枠への遷移）を元に確定する必要がある。
+// 安全装置：
+//   1. DRY_RUN 既定ON（実クリックしない）
+//   2. 減算前に「行の時間」「列の日付」が予約と一致するか照合し、不一致なら中止
+//   3. 減算上限（MAX_DECREMENT）で暴走防止
+//   4. 操作の前後で残数を読み、想定通り減ったか検証
+//   5. 終了時にスクリーンショットを保存
+//
+// 環境変数：
+//   JALAN_ID / JALAN_PASSWORD / SHOP_NAME
+//   SLOT_DATE (YYYY-MM-DD) / SLOT_TIME (HH:MM) / SLOT_DECREMENT
+//   DRY_RUN (既定 true) / HEADLESS (既定 true) / MAX_DECREMENT (既定 10)
 // ============================================================
 
 import { chromium } from 'playwright';
@@ -26,20 +32,27 @@ const CONFIG = {
   password:  process.env.JALAN_PASSWORD,
   shopName:  process.env.SHOP_NAME || 'のみくい処 七ツ家',
   date:      process.env.SLOT_DATE,
-  time:      process.env.SLOT_TIME,
+  time:      normalizeHm(process.env.SLOT_TIME),
   decrement: parseInt(process.env.SLOT_DECREMENT || '0', 10),
   dryRun:    process.env.DRY_RUN !== 'false',
   headless:  process.env.HEADLESS !== 'false',
+  maxDec:    parseInt(process.env.MAX_DECREMENT || '10', 10),
+  maxWindowAdvance: 30, // 14日窓を最大何回送るか（無限ループ防止）
 };
 
+function normalizeHm(t) {
+  if (!t) return '';
+  const m = String(t).match(/(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2, '0')}:${m[2]}` : String(t).trim();
+}
+
 function assertConfig() {
-  const missing = [];
-  if (!CONFIG.id)        missing.push('JALAN_ID');
-  if (!CONFIG.password)  missing.push('JALAN_PASSWORD');
-  if (!CONFIG.date)      missing.push('SLOT_DATE');
-  if (!CONFIG.time)      missing.push('SLOT_TIME');
-  if (!CONFIG.decrement) missing.push('SLOT_DECREMENT');
-  if (missing.length) throw new Error(`必須の環境変数が未設定: ${missing.join(', ')}`);
+  const miss = [];
+  ['id', 'password', 'date', 'time', 'decrement'].forEach(k => { if (!CONFIG[k]) miss.push(k); });
+  if (miss.length) throw new Error(`必須の環境変数が未設定: ${miss.join(', ')}`);
+  if (CONFIG.decrement > CONFIG.maxDec) {
+    throw new Error(`減算数 ${CONFIG.decrement} が上限 ${CONFIG.maxDec} を超えています（安全停止）`);
+  }
 }
 
 async function main() {
@@ -50,8 +63,8 @@ async function main() {
     headless: CONFIG.headless,
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
   });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const page = await browser.newPage();
+  let mng = null;
 
   try {
     // ---------- 1. ログイン（AirID） ----------
@@ -61,41 +74,68 @@ async function main() {
     await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
     await page.getByRole('button', { name: 'ログイン' }).click();
     await page.waitForLoadState('networkidle');
-    console.log('[1/4] ログイン完了');
+    console.log('[1/5] ログイン完了');
 
-    // ---------- 2. 店舗を選択 ----------
+    // ---------- 2. 店舗選択 ----------
     await page.getByRole('link', { name: CONFIG.shopName }).click();
-    console.log(`[2/4] 店舗選択: ${CONFIG.shopName}`);
+    console.log(`[2/5] 店舗選択: ${CONFIG.shopName}`);
 
-    // ---------- 3. 予約・販売管理（別ウィンドウ）を開く ----------
+    // ---------- 3. 予約・販売管理（別ウィンドウ） ----------
     const popupPromise = page.waitForEvent('popup');
     await page.getByRole('link', { name: '予約・販売管理', exact: true }).click();
-    const mng = await popupPromise;
+    mng = await popupPromise;
     await mng.waitForLoadState('networkidle');
-    console.log('[3/4] 予約・販売管理を開いた');
+    console.log('[3/5] 予約・販売管理を開いた');
 
-    // ---------- 4. 対象日時の枠を特定して減算 ----------
-    const minusBtn = await findSlotMinusButton(mng, CONFIG.date, CONFIG.time);
-    if (!minusBtn) {
-      console.log('⚠️ 対象日時の枠が見つかりませんでした（日付・時間遷移の実装が未確定）。');
-      console.log('   2回目の録画（特定日付→特定時間枠）を元に findSlotMinusButton を実装してください。');
-      await mng.screenshot({ path: 'error-screenshot.png', fullPage: true }).catch(() => {});
+    // ---------- 4. 対象日付が14日窓に入るまでカレンダーを送る ----------
+    const col = await locateDateColumn(mng, CONFIG.date);
+    if (col.index < 0) {
+      console.log(`⚠️ 対象日 ${CONFIG.date} をカレンダーで見つけられませんでした。`);
+      console.log('   日付ヘッダのセレクタ（DATE_HEADER_SELECTOR）の確定が必要です。');
+      await dumpAndShot(mng);
+      return;
+    }
+    console.log(`[4/5] 対象日を列 ${col.index} で特定 (見出し: "${col.label}")`);
+
+    // ---------- 5. 対象時間の行を特定 → セルのマイナスを減算 ----------
+    const cell = await locateSlotCell(mng, CONFIG.time, col.index);
+    if (!cell) {
+      console.log(`⚠️ 時間 ${CONFIG.time} の枠（行）が見つかりませんでした。`);
+      await dumpAndShot(mng);
       return;
     }
 
-    console.log(`[4/4] マイナスを ${CONFIG.decrement} 回クリック`);
+    const before = await readStock(cell);
+    console.log(`[5/5] 対象枠の現在残数: ${before}`);
+    if (before === null) {
+      console.log('⚠️ この枠は在庫操作対象外（受付制限など）の可能性。安全のため中止。');
+      await dumpAndShot(mng);
+      return;
+    }
+
+    const target = Math.max(0, before - CONFIG.decrement);
+    console.log(`    ${before} → ${target} に変更予定`);
+
     if (CONFIG.dryRun) {
       console.log('🟡 DRY_RUN のためクリックしません（確認のみ）');
     } else {
+      const minus = cell.locator('.stepper-button-minus');
       for (let i = 0; i < CONFIG.decrement; i++) {
-        await minusBtn.click();
-        await mng.waitForTimeout(400); // 連打しすぎないよう間隔
+        const cur = await readStock(cell);
+        if (cur !== null && cur <= 0) { console.log('    残数0のため停止'); break; }
+        await minus.click();
+        await mng.waitForTimeout(500);
       }
-      console.log('✅ 減算完了（即反映）');
+      const after = await readStock(cell);
+      console.log(`✅ 減算完了：残数 ${after}`);
+      if (after !== null && after !== target) {
+        console.log(`⚠️ 想定(${target})と実際(${after})が不一致。手動確認してください。`);
+      }
     }
+    await mng.screenshot({ path: 'result-screenshot.png', fullPage: true }).catch(() => {});
   } catch (err) {
     console.error('❌ エラー:', err.message);
-    await page.screenshot({ path: 'error-screenshot.png', fullPage: true }).catch(() => {});
+    await dumpAndShot(mng || page);
     process.exitCode = 1;
   } finally {
     await browser.close();
@@ -103,14 +143,73 @@ async function main() {
 }
 
 // ------------------------------------------------------------
-// 対象日付・時間の枠の「マイナス」ボタンを返す
-// TODO: 2回目の録画（特定日付への遷移＋特定時間枠の選択）を元に実装する。
-//   - カレンダーで CONFIG.date の月へ移動 → 日付をクリック
-//   - 時間枠 CONFIG.time の行を特定 → その行の「マイナス」ボタンを返す
-// 現状は未確定のため null を返して安全停止する。
+// 日付ヘッダを読み、対象日(YYYY-MM-DD)の列インデックスを返す。
+// 14日窓に入っていなければ「次へ」を押して送る。
+// ⚠️ DATE_HEADER_SELECTOR と NEXT_BUTTON_SELECTOR は実画面で確定が必要。
 // ------------------------------------------------------------
-async function findSlotMinusButton(mngPage, date, time) {
+const DATE_HEADER_SELECTOR = process.env.DATE_HEADER_SELECTOR || '.calendar-header li, .date-header li, .calendar-date li';
+const NEXT_BUTTON_SELECTOR = process.env.NEXT_BUTTON_SELECTOR || 'text=次へ';
+
+async function locateDateColumn(mng, targetDate) {
+  const [ty, tm, td] = targetDate.split('-').map(Number);
+  for (let advance = 0; advance <= CONFIG.maxWindowAdvance; advance++) {
+    const headers = await mng.locator(DATE_HEADER_SELECTOR).allInnerTexts().catch(() => []);
+    console.log(`   日付ヘッダ候補(${headers.length}): ${JSON.stringify(headers.slice(0, 14))}`);
+    for (let i = 0; i < headers.length; i++) {
+      const m = headers[i].match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})/) || headers[i].match(/\b(\d{1,2})\b/);
+      if (!m) continue;
+      // "8/14" 形式 or 単独日付
+      const mm = m[2] ? Number(m[1]) : tm;
+      const dd = m[2] ? Number(m[2]) : Number(m[1]);
+      if (mm === tm && dd === td) return { index: i, label: headers[i].trim() };
+    }
+    // 見つからなければ次の窓へ
+    const next = mng.locator(NEXT_BUTTON_SELECTOR).first();
+    if (await next.count() === 0) break;
+    await next.click();
+    await mng.waitForTimeout(800);
+  }
+  return { index: -1, label: '' };
+}
+
+// ------------------------------------------------------------
+// 対象時間の行を .time テキストで特定し、その行の col 番目のセル(li)を返す。
+// ------------------------------------------------------------
+async function locateSlotCell(mng, time, colIndex) {
+  const rows = mng.locator('.calendar-wrap, .slot-row, tr').filter({ has: mng.locator('.time') });
+  const rowCount = await rows.count();
+  for (let r = 0; r < rowCount; r++) {
+    const row = rows.nth(r);
+    const timeText = (await row.locator('.time').first().innerText().catch(() => '')).trim();
+    const start = normalizeHm(timeText);
+    if (start && start === time) {
+      const cells = row.locator('.calendar ol > li');
+      if (await cells.count() > colIndex) return cells.nth(colIndex);
+    }
+  }
+  // フォールバック：.time を全走査
+  const times = mng.locator('.time');
+  const n = await times.count();
+  for (let i = 0; i < n; i++) {
+    const t = normalizeHm((await times.nth(i).innerText().catch(() => '')).trim());
+    if (t === time) {
+      const ol = times.nth(i).locator('xpath=ancestor::*[.//ol][1]').locator('.calendar ol > li');
+      if (await ol.count() > colIndex) return ol.nth(colIndex);
+    }
+  }
   return null;
+}
+
+async function readStock(cell) {
+  const txt = await cell.locator('.stock-cnt').first().innerText().catch(() => null);
+  if (txt === null) return null;
+  const n = parseInt(txt.replace(/[^\d]/g, ''), 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+async function dumpAndShot(p) {
+  if (!p) return;
+  await p.screenshot({ path: 'error-screenshot.png', fullPage: true }).catch(() => {});
 }
 
 main();
