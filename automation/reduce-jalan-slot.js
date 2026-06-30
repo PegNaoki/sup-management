@@ -143,31 +143,38 @@ async function main() {
 }
 
 // ------------------------------------------------------------
-// 日付ヘッダを読み、対象日(YYYY-MM-DD)の列インデックスを返す。
+// 日付ヘッダ(.day = "6/30" 形式)を読み、対象日の列インデックスを返す。
 // 14日窓に入っていなければ「次へ」を押して送る。
-// ⚠️ DATE_HEADER_SELECTOR と NEXT_BUTTON_SELECTOR は実画面で確定が必要。
+//   - 日付ヘッダ : span.day （例 "6/30"）
+//   - 次へ送り   : 録画で確認した .action-link（ナビ部）。環境変数で上書き可。
 // ------------------------------------------------------------
-const DATE_HEADER_SELECTOR = process.env.DATE_HEADER_SELECTOR || '.calendar-header li, .date-header li, .calendar-date li';
-const NEXT_BUTTON_SELECTOR = process.env.NEXT_BUTTON_SELECTOR || 'text=次へ';
+const DATE_HEADER_SELECTOR = process.env.DATE_HEADER_SELECTOR || 'span.day';
+const NEXT_BUTTON_SELECTOR = process.env.NEXT_BUTTON_SELECTOR || '.calendar > div:nth-child(3) > .action-link';
 
 async function locateDateColumn(mng, targetDate) {
-  const [ty, tm, td] = targetDate.split('-').map(Number);
+  const [, tm, td] = targetDate.split('-').map(Number);
+  let prevFirst = '';
   for (let advance = 0; advance <= CONFIG.maxWindowAdvance; advance++) {
-    const headers = await mng.locator(DATE_HEADER_SELECTOR).allInnerTexts().catch(() => []);
-    console.log(`   日付ヘッダ候補(${headers.length}): ${JSON.stringify(headers.slice(0, 14))}`);
-    for (let i = 0; i < headers.length; i++) {
-      const m = headers[i].match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})/) || headers[i].match(/\b(\d{1,2})\b/);
-      if (!m) continue;
-      // "8/14" 形式 or 単独日付
-      const mm = m[2] ? Number(m[1]) : tm;
-      const dd = m[2] ? Number(m[2]) : Number(m[1]);
-      if (mm === tm && dd === td) return { index: i, label: headers[i].trim() };
+    const days = await mng.locator(DATE_HEADER_SELECTOR).allInnerTexts().catch(() => []);
+    console.log(`   日付ヘッダ(${days.length}): ${JSON.stringify(days.slice(0, 14))}`);
+    for (let i = 0; i < days.length; i++) {
+      const m = days[i].match(/(\d{1,2})\s*\/\s*(\d{1,2})/);
+      if (m && Number(m[1]) === tm && Number(m[2]) === td) {
+        return { index: i, label: days[i].trim() };
+      }
     }
-    // 見つからなければ次の窓へ
+    // 窓が動かなくなったら終了（同じ先頭日付が続く）
+    const first = days[0] || '';
+    if (advance > 0 && first === prevFirst) {
+      console.log('   これ以上カレンダーを送れませんでした。');
+      break;
+    }
+    prevFirst = first;
+
     const next = mng.locator(NEXT_BUTTON_SELECTOR).first();
-    if (await next.count() === 0) break;
+    if (await next.count() === 0) { console.log('   「次へ」ボタンが見つかりません。'); break; }
     await next.click();
-    await mng.waitForTimeout(800);
+    await mng.waitForTimeout(900);
   }
   return { index: -1, label: '' };
 }
