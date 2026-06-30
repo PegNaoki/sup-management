@@ -155,20 +155,38 @@ async function main() {
       for (let i = 0; i < CONFIG.decrement; i++) {
         const cur = await readStock(cell);
         if (cur !== null && cur <= 0) { log('stop_zero', { at: i }); break; }
+        // 保存通信(saveSlotCnt)の完了を待ってから次へ。
+        // クリックは非同期でサーバー保存を発火するため、レスポンスを待たないと
+        // ブラウザを閉じた時に保存が中断されて反映されない。
+        const saveResp = mng.waitForResponse(
+          res => /slot|stock|save|reserve|inventory/i.test(res.url()) && res.request().method() !== 'GET',
+          { timeout: 8000 },
+        ).catch(() => null);
         await minus.click();
+        const resp = await saveResp;
+        log('save_request', { matched: !!resp, url: resp ? resp.url() : null, status: resp ? resp.status() : null });
         clicks++;
-        await mng.waitForTimeout(500);
+        await mng.waitForTimeout(800);
       }
-      const after = await readStock(cell);
-      log('stock_after', { after, clicks });
-      if (after !== null && after !== target) {
-        result = 'mismatch';
+      await mng.waitForLoadState('networkidle').catch(() => {});
+
+      // 画面の見た目ではなく「保存後のサーバー値」で検証する。
+      // 管理画面をリロードして読み直し、本当に減ったかを確認する。
+      const afterReload = await reReadStockAfterReload(mng);
+      log('stock_after', { afterReload, clicks });
+      if (afterReload === null) {
+        result = 'unverified';
         await dumpAndShot(mng);
-        // 想定と実際がズレた＝要人手確認。異常終了させて通知に乗せる。
-        throw new SlotSyncError(`減算結果が想定(${target})と不一致(${after})。手動確認が必要です`);
+        throw new SlotSyncError('減算後の残数をリロード後に確認できませんでした（要手動確認）');
+      }
+      if (afterReload !== target) {
+        result = 'not_persisted';
+        await dumpAndShot(mng);
+        // リロード後に想定値でない＝サーバーに保存されていない可能性。異常終了で通知。
+        throw new SlotSyncError(`保存検証NG：想定(${target})だがリロード後は(${afterReload})。サーバーに反映されていません`);
       }
       result = 'reduced';
-      log('reduced', { before, after });
+      log('reduced', { before, after: afterReload });
     }
     await mng.screenshot({ path: 'result-screenshot.png', fullPage: true }).catch(() => {});
   } catch (err) {
@@ -246,6 +264,21 @@ async function locateSlotCell(mng, time, colIndex) {
     }
   }
   return null;
+}
+
+// 管理画面をリロードし、対象日時の枠の残数をサーバー値として読み直す。
+// 見た目（楽観的更新）ではなく、保存された本当の値で検証するために使う。
+async function reReadStockAfterReload(mng) {
+  try {
+    await mng.reload({ waitUntil: 'networkidle' });
+  } catch (e) {
+    await mng.waitForTimeout(1500);
+  }
+  const col = await locateDateColumn(mng, CONFIG.date);
+  if (col.index < 0) return null;
+  const cell = await locateSlotCell(mng, CONFIG.time, col.index);
+  if (!cell) return null;
+  return await readStock(cell);
 }
 
 async function readStock(cell) {
