@@ -2,30 +2,33 @@
 // じゃらん遊び・体験 (ACTIVITY BOARD) 在庫枠 自動減算スクリプト
 // ------------------------------------------------------------
 // 他サイトで予約が入ったとき、じゃらん側の該当日時の在庫枠を減らす。
+// ログインは AirID 認証。枠は「マイナス」ボタンのクリックで即反映（保存不要）。
 //
-// 環境変数で動作を制御する：
-//   JALAN_ID        : ACTIVITY BOARD ログインID
-//   JALAN_PASSWORD  : ACTIVITY BOARD ログインパスワード
+// 環境変数：
+//   JALAN_ID        : AirID または メールアドレス
+//   JALAN_PASSWORD  : パスワード
+//   SHOP_NAME       : 店舗名（既定: のみくい処 七ツ家）
 //   SLOT_DATE       : 対象日 (YYYY-MM-DD)
 //   SLOT_TIME       : 対象時間 (HH:MM)
 //   SLOT_DECREMENT  : 減らす人数 (例: 6)
-//   DRY_RUN         : "true" のとき実際の保存は行わず確認のみ（既定: true）
-//   HEADLESS        : "false" でブラウザを表示（ローカルデバッグ用、既定: true）
+//   DRY_RUN         : "true" のとき実際のクリックは行わず確認のみ（既定: true）
+//   HEADLESS        : "false" でブラウザ表示（ローカルデバッグ用、既定: true）
 //
-// ⚠️ セレクタ（input[name=...] など）は ACTIVITY BOARD の実画面に合わせて
-//    後で確定する必要がある。現状は TODO マーカー付きの仮値。
+// ⚠️ 日付・時間枠を特定する部分（findSlotMinusButton）は、2回目の録画
+//    （特定日付・特定時間枠への遷移）を元に確定する必要がある。
 // ============================================================
 
 import { chromium } from 'playwright';
 
 const CONFIG = {
-  loginUrl: 'https://activityboard.jp/',
+  topUrl:    'https://activityboard.jp/',
   id:        process.env.JALAN_ID,
   password:  process.env.JALAN_PASSWORD,
+  shopName:  process.env.SHOP_NAME || 'のみくい処 七ツ家',
   date:      process.env.SLOT_DATE,
   time:      process.env.SLOT_TIME,
   decrement: parseInt(process.env.SLOT_DECREMENT || '0', 10),
-  dryRun:    process.env.DRY_RUN !== 'false',   // 既定は安全側(true)
+  dryRun:    process.env.DRY_RUN !== 'false',
   headless:  process.env.HEADLESS !== 'false',
 };
 
@@ -36,9 +39,7 @@ function assertConfig() {
   if (!CONFIG.date)      missing.push('SLOT_DATE');
   if (!CONFIG.time)      missing.push('SLOT_TIME');
   if (!CONFIG.decrement) missing.push('SLOT_DECREMENT');
-  if (missing.length) {
-    throw new Error(`必須の環境変数が未設定です: ${missing.join(', ')}`);
-  }
+  if (missing.length) throw new Error(`必須の環境変数が未設定: ${missing.join(', ')}`);
 }
 
 async function main() {
@@ -53,55 +54,63 @@ async function main() {
   const page = await context.newPage();
 
   try {
-    // ---------- 1. ログイン ----------
-    await page.goto(CONFIG.loginUrl, { waitUntil: 'networkidle' });
-    // TODO: 実際の入力欄セレクタに差し替える
-    await page.fill('input[name="loginId"]', CONFIG.id);
-    await page.fill('input[name="password"]', CONFIG.password);
-    await page.click('button[type="submit"]');
+    // ---------- 1. ログイン（AirID） ----------
+    await page.goto(CONFIG.topUrl, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('link', { name: 'ログイン' }).click();
+    await page.getByRole('textbox', { name: 'AirIDまたはメールアドレス' }).fill(CONFIG.id);
+    await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
+    await page.getByRole('button', { name: 'ログイン' }).click();
     await page.waitForLoadState('networkidle');
     console.log('[1/4] ログイン完了');
 
-    // ---------- 2. 在庫カレンダー画面へ遷移 ----------
-    // TODO: 在庫管理メニューのリンク/URLに差し替える
-    // await page.click('text=在庫管理');
-    // await page.waitForLoadState('networkidle');
-    console.log('[2/4] 在庫管理画面へ遷移 (TODO: セレクタ確定)');
+    // ---------- 2. 店舗を選択 ----------
+    await page.getByRole('link', { name: CONFIG.shopName }).click();
+    console.log(`[2/4] 店舗選択: ${CONFIG.shopName}`);
 
-    // ---------- 3. 対象日時の枠を特定して現在値を取得 ----------
-    // TODO: カレンダーで CONFIG.date を選択 → CONFIG.time の枠の input を取得
-    // const slotInput = page.locator(`[data-date="${CONFIG.date}"][data-time="${CONFIG.time}"] input`);
-    // const current = parseInt(await slotInput.inputValue(), 10);
-    const current = null; // ← 実装後に取得
-    console.log(`[3/4] 現在の枠数: ${current} (TODO: 取得処理)`);
+    // ---------- 3. 予約・販売管理（別ウィンドウ）を開く ----------
+    const popupPromise = page.waitForEvent('popup');
+    await page.getByRole('link', { name: '予約・販売管理', exact: true }).click();
+    const mng = await popupPromise;
+    await mng.waitForLoadState('networkidle');
+    console.log('[3/4] 予約・販売管理を開いた');
 
-    if (current === null) {
-      console.log('⚠️ セレクタ未確定のため、ここで安全停止します。');
-      console.log('   ACTIVITY BOARD の在庫画面の構造を確認後、TODO部分を実装してください。');
+    // ---------- 4. 対象日時の枠を特定して減算 ----------
+    const minusBtn = await findSlotMinusButton(mng, CONFIG.date, CONFIG.time);
+    if (!minusBtn) {
+      console.log('⚠️ 対象日時の枠が見つかりませんでした（日付・時間遷移の実装が未確定）。');
+      console.log('   2回目の録画（特定日付→特定時間枠）を元に findSlotMinusButton を実装してください。');
+      await mng.screenshot({ path: 'error-screenshot.png', fullPage: true }).catch(() => {});
       return;
     }
 
-    // ---------- 4. 減算して保存 ----------
-    const next = Math.max(0, current - CONFIG.decrement);
-    console.log(`[4/4] ${current} → ${next} に変更`);
-
+    console.log(`[4/4] マイナスを ${CONFIG.decrement} 回クリック`);
     if (CONFIG.dryRun) {
-      console.log('🟡 DRY_RUN のため保存しません（確認のみ）');
+      console.log('🟡 DRY_RUN のためクリックしません（確認のみ）');
     } else {
-      // TODO: 値を書き込んで保存ボタンを押す
-      // await slotInput.fill(String(next));
-      // await page.click('text=保存');
-      // await page.waitForLoadState('networkidle');
-      console.log('✅ 保存しました');
+      for (let i = 0; i < CONFIG.decrement; i++) {
+        await minusBtn.click();
+        await mng.waitForTimeout(400); // 連打しすぎないよう間隔
+      }
+      console.log('✅ 減算完了（即反映）');
     }
   } catch (err) {
     console.error('❌ エラー:', err.message);
-    // 失敗時のスクショを残す（GitHub Actions のアーティファクトで確認できる）
     await page.screenshot({ path: 'error-screenshot.png', fullPage: true }).catch(() => {});
     process.exitCode = 1;
   } finally {
     await browser.close();
   }
+}
+
+// ------------------------------------------------------------
+// 対象日付・時間の枠の「マイナス」ボタンを返す
+// TODO: 2回目の録画（特定日付への遷移＋特定時間枠の選択）を元に実装する。
+//   - カレンダーで CONFIG.date の月へ移動 → 日付をクリック
+//   - 時間枠 CONFIG.time の行を特定 → その行の「マイナス」ボタンを返す
+// 現状は未確定のため null を返して安全停止する。
+// ------------------------------------------------------------
+async function findSlotMinusButton(mngPage, date, time) {
+  return null;
 }
 
 main();
