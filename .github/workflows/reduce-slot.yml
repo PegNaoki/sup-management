@@ -40,13 +40,40 @@ jobs:
           SLOT_TIME:      ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
           SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement || github.event.inputs.slot_decrement }}
           DRY_RUN:        ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
+          DEDUP_KEY:      ${{ github.event.client_payload.dedup_key }}
           HEADLESS:       "true"
         run: node reduce-jalan-slot.js
 
-      - name: Upload error screenshot
-        if: failure()
+      # 実行ログ(JSON Lines)とスクショを成功・失敗どちらでも保存
+      - name: Upload run log & screenshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: error-screenshot
-          path: automation/error-screenshot.png
+          name: run-artifacts-${{ github.run_id }}
+          path: |
+            automation/run-log.jsonl
+            automation/result-screenshot.png
+            automation/error-screenshot.png
           if-no-files-found: ignore
+
+      # 在庫連動が失敗したら即LINE ALERT（オーバーブッキング懸念）
+      - name: Notify failure to LINE
+        if: failure()
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_USER:  ${{ secrets.LINE_USER_ID }}
+          SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
+          SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
+          SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement || github.event.inputs.slot_decrement }}
+          SOURCE_SITE: ${{ github.event.client_payload.source_site }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
+            echo "LINE未設定のため通知スキップ"; exit 0
+          fi
+          TEXT="🚨【至急】OTA在庫の連動に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} -${SLOT_DECREMENT}名（発生元: ${SOURCE_SITE}）\n影響: じゃらんの在庫が減っていない可能性 → オーバーブッキング懸念\n👉 じゃらん管理画面で在庫を手動調整してください\nログ: ${RUN_URL}"
+          PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
+          curl -sS -X POST https://api.line.me/v2/bot/message/push \
+            -H "Authorization: Bearer $LINE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"

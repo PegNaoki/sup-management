@@ -25,6 +25,7 @@
 // ============================================================
 
 import { chromium } from 'playwright';
+import fs from 'fs';
 
 const CONFIG = {
   topUrl:    'https://activityboard.jp/',
@@ -37,8 +38,35 @@ const CONFIG = {
   dryRun:    process.env.DRY_RUN !== 'false',
   headless:  process.env.HEADLESS !== 'false',
   maxDec:    parseInt(process.env.MAX_DECREMENT || '10', 10),
+  dedupKey:  process.env.DEDUP_KEY || '',   // {source_site}:{bookingNo} 二重減算防止用
+  logPath:   process.env.LOG_PATH || 'run-log.jsonl',
   maxWindowAdvance: 30, // 14日窓を最大何回送るか（無限ループ防止）
 };
+
+// ------------------------------------------------------------
+// 構造化ログ（JSON Lines）。成功・失敗にかかわらず1行ずつ追記し、
+// GitHub Actions の artifact で監査・障害解析できるようにする。
+// ------------------------------------------------------------
+const RUN_LOG = [];
+function log(event, data = {}) {
+  const rec = { ts: new Date().toISOString(), event, ...data };
+  RUN_LOG.push(rec);
+  console.log(`${rec.ts} [${event}] ${JSON.stringify(data)}`);
+}
+function flushLog(extra = {}) {
+  try {
+    const summary = { ts: new Date().toISOString(), event: 'summary', dedupKey: CONFIG.dedupKey,
+      date: CONFIG.date, time: CONFIG.time, decrement: CONFIG.decrement, dryRun: CONFIG.dryRun, ...extra };
+    RUN_LOG.push(summary);
+    fs.writeFileSync(CONFIG.logPath, RUN_LOG.map(r => JSON.stringify(r)).join('\n') + '\n');
+  } catch (e) {
+    console.error('ログ書き出し失敗:', e.message);
+  }
+}
+
+// セレクタ不在・対象未検出など「成功扱いで終わってはいけない」失敗を表す。
+// これを投げると catch で exitCode=1 となり、Actions が赤くなる（サイレント失敗の排除）。
+class SlotSyncError extends Error {}
 
 function normalizeHm(t) {
   if (!t) return '';
@@ -57,7 +85,7 @@ function assertConfig() {
 
 async function main() {
   assertConfig();
-  console.log(`[開始] ${CONFIG.date} ${CONFIG.time} の枠を ${CONFIG.decrement} 減算 (dryRun=${CONFIG.dryRun})`);
+  log('start', { date: CONFIG.date, time: CONFIG.time, decrement: CONFIG.decrement, dryRun: CONFIG.dryRun, dedupKey: CONFIG.dedupKey });
 
   const browser = await chromium.launch({
     headless: CONFIG.headless,
@@ -65,6 +93,7 @@ async function main() {
   });
   const page = await browser.newPage();
   let mng = null;
+  let result = 'unknown';
 
   try {
     // ---------- 1. ログイン（AirID） ----------
@@ -74,12 +103,12 @@ async function main() {
     await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
     await page.getByRole('button', { name: 'ログイン' }).click();
     await page.waitForLoadState('networkidle');
-    console.log('[1/5] ログイン完了');
+    log('login_ok');
 
     // ---------- 2. 店舗選択 ----------
     await page.getByRole('link', { name: CONFIG.shopName }).click();
     await page.waitForLoadState('networkidle');
-    console.log(`[2/5] 店舗選択: ${CONFIG.shopName}`);
+    log('shop_selected', { shop: CONFIG.shopName });
 
     // ---------- 3. 予約・販売管理（別ウィンドウ or 同一タブ） ----------
     const mngLink = page.getByRole('link', { name: '予約・販売管理', exact: true });
@@ -87,65 +116,69 @@ async function main() {
     const popupPromise = page.waitForEvent('popup', { timeout: 8000 }).catch(() => null);
     await mngLink.click();
     const popup = await popupPromise;
-    if (popup) {
-      mng = popup;                       // 別ウィンドウで開いた場合
-    } else {
-      mng = page;                        // 同一タブで遷移した場合
-    }
+    mng = popup || page;                 // 別ウィンドウ or 同一タブ
     await mng.waitForLoadState('networkidle');
-    console.log('[3/5] 予約・販売管理を開いた' + (popup ? '（別ウィンドウ）' : '（同一タブ）'));
+    log('management_opened', { popup: !!popup });
 
     // ---------- 4. 対象日付が14日窓に入るまでカレンダーを送る ----------
     const col = await locateDateColumn(mng, CONFIG.date);
     if (col.index < 0) {
-      console.log(`⚠️ 対象日 ${CONFIG.date} をカレンダーで見つけられませんでした。`);
-      console.log('   日付ヘッダのセレクタ（DATE_HEADER_SELECTOR）の確定が必要です。');
       await dumpAndShot(mng);
-      return;
+      // サイレント失敗の排除：見つからない＝異常終了させる
+      throw new SlotSyncError(`対象日 ${CONFIG.date} をカレンダーで特定できませんでした（日付ヘッダのセレクタ要確認）`);
     }
-    console.log(`[4/5] 対象日を列 ${col.index} で特定 (見出し: "${col.label}")`);
+    log('date_located', { index: col.index, label: col.label });
 
     // ---------- 5. 対象時間の行を特定 → セルのマイナスを減算 ----------
     const cell = await locateSlotCell(mng, CONFIG.time, col.index);
     if (!cell) {
-      console.log(`⚠️ 時間 ${CONFIG.time} の枠（行）が見つかりませんでした。`);
       await dumpAndShot(mng);
-      return;
+      throw new SlotSyncError(`時間 ${CONFIG.time} の枠（行）を特定できませんでした（時間行のセレクタ要確認）`);
     }
 
     const before = await readStock(cell);
-    console.log(`[5/5] 対象枠の現在残数: ${before}`);
+    log('stock_before', { before });
     if (before === null) {
-      console.log('⚠️ この枠は在庫操作対象外（受付制限など）の可能性。安全のため中止。');
       await dumpAndShot(mng);
-      return;
+      throw new SlotSyncError(`対象枠の残数を読み取れませんでした（受付制限/在庫操作対象外、またはセレクタ要確認）`);
     }
 
     const target = Math.max(0, before - CONFIG.decrement);
-    console.log(`    ${before} → ${target} に変更予定`);
+    log('plan', { before, target });
 
     if (CONFIG.dryRun) {
-      console.log('🟡 DRY_RUN のためクリックしません（確認のみ）');
+      result = 'dry_run';
+      log('dry_run', { note: 'クリックせず確認のみ' });
     } else {
       const minus = cell.locator('.stepper-button-minus');
+      let clicks = 0;
       for (let i = 0; i < CONFIG.decrement; i++) {
         const cur = await readStock(cell);
-        if (cur !== null && cur <= 0) { console.log('    残数0のため停止'); break; }
+        if (cur !== null && cur <= 0) { log('stop_zero', { at: i }); break; }
         await minus.click();
+        clicks++;
         await mng.waitForTimeout(500);
       }
       const after = await readStock(cell);
-      console.log(`✅ 減算完了：残数 ${after}`);
+      log('stock_after', { after, clicks });
       if (after !== null && after !== target) {
-        console.log(`⚠️ 想定(${target})と実際(${after})が不一致。手動確認してください。`);
+        result = 'mismatch';
+        await dumpAndShot(mng);
+        // 想定と実際がズレた＝要人手確認。異常終了させて通知に乗せる。
+        throw new SlotSyncError(`減算結果が想定(${target})と不一致(${after})。手動確認が必要です`);
       }
+      result = 'reduced';
+      log('reduced', { before, after });
     }
     await mng.screenshot({ path: 'result-screenshot.png', fullPage: true }).catch(() => {});
   } catch (err) {
+    result = result === 'unknown' ? 'error' : result;
+    log('error', { message: err.message, type: err.constructor.name });
     console.error('❌ エラー:', err.message);
     await dumpAndShot(mng || page);
     process.exitCode = 1;
   } finally {
+    flushLog({ result });
     await browser.close();
   }
 }
