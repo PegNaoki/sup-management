@@ -78,14 +78,22 @@ async function main() {
 
     // ---------- 2. 店舗選択 ----------
     await page.getByRole('link', { name: CONFIG.shopName }).click();
+    await page.waitForLoadState('networkidle');
     console.log(`[2/5] 店舗選択: ${CONFIG.shopName}`);
 
-    // ---------- 3. 予約・販売管理（別ウィンドウ） ----------
-    const popupPromise = page.waitForEvent('popup');
-    await page.getByRole('link', { name: '予約・販売管理', exact: true }).click();
-    mng = await popupPromise;
+    // ---------- 3. 予約・販売管理（別ウィンドウ or 同一タブ） ----------
+    const mngLink = page.getByRole('link', { name: '予約・販売管理', exact: true });
+    await mngLink.waitFor({ state: 'visible', timeout: 30000 });
+    const popupPromise = page.waitForEvent('popup', { timeout: 8000 }).catch(() => null);
+    await mngLink.click();
+    const popup = await popupPromise;
+    if (popup) {
+      mng = popup;                       // 別ウィンドウで開いた場合
+    } else {
+      mng = page;                        // 同一タブで遷移した場合
+    }
     await mng.waitForLoadState('networkidle');
-    console.log('[3/5] 予約・販売管理を開いた');
+    console.log('[3/5] 予約・販売管理を開いた' + (popup ? '（別ウィンドウ）' : '（同一タブ）'));
 
     // ---------- 4. 対象日付が14日窓に入るまでカレンダーを送る ----------
     const col = await locateDateColumn(mng, CONFIG.date);
