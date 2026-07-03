@@ -92,15 +92,9 @@ async function main() {
     await mng.waitForLoadState('networkidle');
     log('management_opened', { popup: !!popup, url: mng.url() });
 
-    // ---------- 3. 予約検索 → 検索実行 ----------
-    // メニューの描画が遅れることがあるため、複数のセレクタで粘り強く探す
-    await mng.waitForTimeout(2000);
-    const searchLink = mng.getByRole('link', { name: '予約検索' })
-      .or(mng.locator('a', { hasText: '予約検索' }))
-      .first();
-    await searchLink.waitFor({ state: 'visible', timeout: 30000 });
-    await searchLink.click();
-    await mng.waitForLoadState('networkidle');
+    // ---------- 3. 予約検索ページへ直接移動 ----------
+    // 「予約検索」リンクはヘッダーメニュー内に隠れているため、URLへ直接遷移する
+    await mng.goto('https://activityboard.jp/activityboard/booking/list/?from=header', { waitUntil: 'networkidle' });
     log('search_page_opened', { url: mng.url() });
 
     await mng.getByRole('button', { name: '検索する' }).click();
