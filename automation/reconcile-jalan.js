@@ -85,15 +85,24 @@ async function main() {
     // ---------- 2. 店舗選択 → 予約・販売管理 ----------
     await page.getByRole('link', { name: CONFIG.shopName }).click();
     await page.waitForLoadState('networkidle');
-    const popupPromise = page.waitForEvent('popup', { timeout: 8000 }).catch(() => null);
+    const popupPromise = page.waitForEvent('popup', { timeout: 15000 }).catch(() => null);
     await page.getByRole('link', { name: '予約・販売管理', exact: true }).click();
-    mng = (await popupPromise) || page;
+    const popup = await popupPromise;
+    mng = popup || page;
     await mng.waitForLoadState('networkidle');
-    log('management_opened');
+    log('management_opened', { popup: !!popup, url: mng.url() });
 
     // ---------- 3. 予約検索 → 検索実行 ----------
-    await mng.getByRole('link', { name: '予約検索' }).click();
+    // メニューの描画が遅れることがあるため、複数のセレクタで粘り強く探す
+    await mng.waitForTimeout(2000);
+    const searchLink = mng.getByRole('link', { name: '予約検索' })
+      .or(mng.locator('a', { hasText: '予約検索' }))
+      .first();
+    await searchLink.waitFor({ state: 'visible', timeout: 30000 });
+    await searchLink.click();
     await mng.waitForLoadState('networkidle');
+    log('search_page_opened', { url: mng.url() });
+
     await mng.getByRole('button', { name: '検索する' }).click();
     await mng.waitForSelector('#bookingSearchList tr', { timeout: 20000 });
     log('search_done');
