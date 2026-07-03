@@ -903,7 +903,9 @@ function reconcileJalanReservations_(payload) {
     } else {
       const sheetStatus = String(data[rowNum - 1][COLUMNS.STATUS - 1] || '');
       if (r.status === 'キャンセル' && !['キャンセル', '却下'].includes(sheetStatus)) {
-        drift.push(`${r.date} ${r.time} ${no}（じゃらん:キャンセル済 / シート:${sheetStatus}）`);
+        // じゃらんが明示的に「キャンセル」と言っている → シートも自動でキャンセルに
+        cancelSheetRow_(sheet, rowNum, '定期突合：じゃらん側でキャンセル確認');
+        drift.push(`${r.date} ${r.time} ${no}（シートを自動でキャンセルに変更済み）`);
       }
     }
   }
@@ -929,14 +931,29 @@ function reconcileJalanReservations_(payload) {
     if (!ghostByNo[g.no]) ghostByNo[g.no] = { dateStr: g.dateStr, rows: [] };
     ghostByNo[g.no].rows.push(g.row);
   });
-  const ghostLines = Object.entries(ghostByNo).map(([no, g]) =>
-    `${g.dateStr} ${no}` + (g.rows.length > 1 ? `（※シートに${g.rows.length}行重複：行${g.rows.join(',')}）` : ''));
+
+  // ゴースト（じゃらん一覧に無い）の自動キャンセル。
+  // ただし読み取り失敗時の誤キャンセルを防ぐため、上限件数を超えたら通知のみに切替。
+  const GHOST_AUTOFIX_LIMIT = 3;
+  const ghostEntries = Object.entries(ghostByNo);
+  const autoFixGhost = jalanList.length > 0 && ghostEntries.length <= GHOST_AUTOFIX_LIMIT;
+  const ghostLines = ghostEntries.map(([no, g]) => {
+    const dup = g.rows.length > 1 ? `（※シートに${g.rows.length}行重複）` : '';
+    if (autoFixGhost) {
+      g.rows.forEach(rowNum => cancelSheetRow_(sheet, rowNum, '定期突合：じゃらん一覧に存在せず（キャンセル済みと判断）'));
+      return `${g.dateStr} ${no}${dup} → シートを自動でキャンセルに変更済み`;
+    }
+    return `${g.dateStr} ${no}${dup}`;
+  });
+  const ghostNote = (!autoFixGhost && ghostEntries.length > 0)
+    ? `\n（${GHOST_AUTOFIX_LIMIT}件を超えるため自動修正せず通知のみ：読み取り異常の可能性があるため手動確認してください）`
+    : '';
 
   // --- LINE通知 ---
   const lines = [];
   if (missing.length)    lines.push(`⚠️ 取りこぼし検出 ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
-  if (drift.length)      lines.push(`⚠️ キャンセルずれ ${drift.length}件（シートの確認が必要）\n・` + drift.join('\n・'));
-  if (ghostLines.length) lines.push(`⚠️ じゃらん側に無い予約 ${ghostLines.length}件（要確認：じゃらんでキャンセル済みの可能性）\n・` + ghostLines.join('\n・'));
+  if (drift.length)      lines.push(`⚠️ キャンセルずれ ${drift.length}件\n・` + drift.join('\n・'));
+  if (ghostLines.length) lines.push(`⚠️ じゃらん側に無い予約 ${ghostLines.length}件\n・` + ghostLines.join('\n・') + ghostNote);
 
   if (lines.length) {
     postToLine(`📋【じゃらん定期突合】問題を検出しました\n─────────────\n${lines.join('\n─────────────\n')}`);
@@ -947,6 +964,26 @@ function reconcileJalanReservations_(payload) {
   const summary = { checked: jalanList.length, missing: missing.length, drift: drift.length, ghost: ghostLines.length };
   Logger.log('突合完了: ' + JSON.stringify(summary));
   return summary;
+}
+
+// 突合による自動キャンセル：ステータス変更＋カレンダーイベント削除＋対応メモ記録
+function cancelSheetRow_(sheet, rowNum, reason) {
+  sheet.getRange(rowNum, COLUMNS.STATUS).setValue('キャンセル');
+  const memoCell = sheet.getRange(rowNum, COLUMNS.ACTION_MEMO);
+  const memo = String(memoCell.getValue() || '');
+  memoCell.setValue(memo ? `${memo} / ${reason}` : reason);
+
+  const calEventId = sheet.getRange(rowNum, COLUMNS.CALENDAR_ID_COL).getValue();
+  if (calEventId) {
+    try {
+      const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+      const event    = calendar.getEventById(calEventId);
+      if (event) event.deleteEvent();
+      sheet.getRange(rowNum, COLUMNS.CALENDAR_ID_COL).setValue('');
+    } catch (e) {
+      Logger.log(`カレンダー削除エラー(行${rowNum}): ${e.message}`);
+    }
+  }
 }
 
 function loadExistingReservations(sheet) {
