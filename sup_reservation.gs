@@ -919,15 +919,24 @@ function reconcileJalanReservations_(payload) {
     if (!dateStr || dateStr < today) continue;
     const no = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
     if (no && !jalanByNo.has(no)) {
-      ghost.push(`${dateStr} ${no}（シートでは有効だがじゃらん側に見当たらない）`);
+      ghost.push({ no, dateStr, row: i + 1 });
     }
   }
 
+  // 同一予約番号の重複行をまとめる（重複はシート整理が必要なサイン）
+  const ghostByNo = {};
+  ghost.forEach(g => {
+    if (!ghostByNo[g.no]) ghostByNo[g.no] = { dateStr: g.dateStr, rows: [] };
+    ghostByNo[g.no].rows.push(g.row);
+  });
+  const ghostLines = Object.entries(ghostByNo).map(([no, g]) =>
+    `${g.dateStr} ${no}` + (g.rows.length > 1 ? `（※シートに${g.rows.length}行重複：行${g.rows.join(',')}）` : ''));
+
   // --- LINE通知 ---
   const lines = [];
-  if (missing.length) lines.push(`⚠️ 取りこぼし検出 ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
-  if (drift.length)   lines.push(`⚠️ キャンセルずれ ${drift.length}件（シートの確認が必要）\n・` + drift.join('\n・'));
-  if (ghost.length)   lines.push(`⚠️ じゃらん側に無い予約 ${ghost.length}件（要確認）\n・` + ghost.join('\n・'));
+  if (missing.length)    lines.push(`⚠️ 取りこぼし検出 ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (drift.length)      lines.push(`⚠️ キャンセルずれ ${drift.length}件（シートの確認が必要）\n・` + drift.join('\n・'));
+  if (ghostLines.length) lines.push(`⚠️ じゃらん側に無い予約 ${ghostLines.length}件（要確認：じゃらんでキャンセル済みの可能性）\n・` + ghostLines.join('\n・'));
 
   if (lines.length) {
     postToLine(`📋【じゃらん定期突合】問題を検出しました\n─────────────\n${lines.join('\n─────────────\n')}`);
@@ -935,7 +944,7 @@ function reconcileJalanReservations_(payload) {
     postToLine(`✅【じゃらん定期突合】OK\n今日以降 ${jalanList.length}件すべてシートと一致しています`);
   }
 
-  const summary = { checked: jalanList.length, missing: missing.length, drift: drift.length, ghost: ghost.length };
+  const summary = { checked: jalanList.length, missing: missing.length, drift: drift.length, ghost: ghostLines.length };
   Logger.log('突合完了: ' + JSON.stringify(summary));
   return summary;
 }
