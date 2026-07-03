@@ -820,6 +820,126 @@ function parseDateTime(dateStr, timeStr) {
   } catch (e) { return null; }
 }
 
+// ============================================================
+// 定期リコンサイル受信（GitHub Actions → GAS Webアプリ）
+// ------------------------------------------------------------
+// reconcile-jalan.js が読み取った「じゃらんの今日以降の全予約」を受信し、
+// スプレッドシートと突合する。
+//   ・シートに無い確定/仮予約 → 取りこぼしとしてシートに追記＋LINE通知
+//   ・じゃらんではキャンセル済みなのにシートでは有効 → ズレをLINE通知
+//   ・シートでは有効なのにじゃらん側に存在しない → ズレをLINE通知
+//
+// セットアップ：
+//   1. スクリプトプロパティに RECONCILE_TOKEN（任意の長い文字列）を設定
+//   2. デプロイ →「ウェブアプリ」として公開（実行ユーザー:自分 / アクセス:全員）
+//   3. 発行されたURLと同じトークンを GitHub Secrets に設定
+// ============================================================
+function doPost(e) {
+  const out = (obj) => ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+
+  let payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return out({ ok: false, error: 'invalid JSON' });
+  }
+
+  const expected = PropertiesService.getScriptProperties().getProperty('RECONCILE_TOKEN');
+  if (!expected || payload.token !== expected) {
+    return out({ ok: false, error: 'unauthorized' });
+  }
+
+  try {
+    const result = reconcileJalanReservations_(payload);
+    return out({ ok: true, result });
+  } catch (err) {
+    Logger.log('リコンサイルエラー: ' + err.message);
+    try { postToLine(`🚨【至急】じゃらん突合処理でエラー\n${err.message}`); } catch (_) {}
+    return out({ ok: false, error: err.message });
+  }
+}
+
+function reconcileJalanReservations_(payload) {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const existing = loadExistingReservations(sheet);
+  const data  = sheet.getDataRange().getValues();
+
+  const jalanList = (payload.reservations || []);
+  const jalanByNo = new Map();
+  jalanList.forEach(r => { if (r.bookingNo) jalanByNo.set(String(r.bookingNo).trim(), r); });
+
+  const missing = [];   // シートに無い（取りこぼし）
+  const drift   = [];   // じゃらん=キャンセル / シート=有効
+  const ghost   = [];   // シート=有効 / じゃらんに無い
+
+  // --- じゃらん → シート方向 ---
+  for (const r of jalanList) {
+    const no = String(r.bookingNo || '').trim();
+    if (!no) continue;
+    const rowNum = existing.byBookingNo.get(no);
+
+    if (!rowNum) {
+      if (r.status === '確定' || r.status === '仮予約') {
+        // 取りこぼし：シートへ追記（appendToSheetが既存のLINE通知も送る）
+        const rec = {
+          site: 'じゃらんnet',
+          bookingNo: no,
+          name: r.name || '',
+          kana: '',
+          date: String(r.date || '').replace(/-/g, '/'),
+          time: r.time || '',
+          people: r.people || '',
+          peopleDetail: '',
+          amount: r.price || '',
+          payment: '',
+          email: '', phone: '', notes: '（定期突合で自動追記：メール取りこぼし）',
+        };
+        appendToSheet(sheet, rec, `reconcile-${no}`, `【突合検出】じゃらん ${no}`, r.status === '確定' ? '確定' : '仮予約');
+        missing.push(`${r.date} ${r.time} ${no} ${r.people}名`);
+      }
+    } else {
+      const sheetStatus = String(data[rowNum - 1][COLUMNS.STATUS - 1] || '');
+      if (r.status === 'キャンセル' && !['キャンセル', '却下'].includes(sheetStatus)) {
+        drift.push(`${r.date} ${r.time} ${no}（じゃらん:キャンセル済 / シート:${sheetStatus}）`);
+      }
+    }
+  }
+
+  // --- シート → じゃらん方向（じゃらん予約のみ・体験日が今日以降・有効のみ） ---
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  for (let i = 1; i < data.length; i++) {
+    const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
+    if (!site.includes('じゃらん')) continue;
+    const status = String(data[i][COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
+    if (!dateStr || dateStr < today) continue;
+    const no = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
+    if (no && !jalanByNo.has(no)) {
+      ghost.push(`${dateStr} ${no}（シートでは有効だがじゃらん側に見当たらない）`);
+    }
+  }
+
+  // --- LINE通知 ---
+  const lines = [];
+  if (missing.length) lines.push(`⚠️ 取りこぼし検出 ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (drift.length)   lines.push(`⚠️ キャンセルずれ ${drift.length}件（シートの確認が必要）\n・` + drift.join('\n・'));
+  if (ghost.length)   lines.push(`⚠️ じゃらん側に無い予約 ${ghost.length}件（要確認）\n・` + ghost.join('\n・'));
+
+  if (lines.length) {
+    postToLine(`📋【じゃらん定期突合】問題を検出しました\n─────────────\n${lines.join('\n─────────────\n')}`);
+  } else {
+    postToLine(`✅【じゃらん定期突合】OK\n今日以降 ${jalanList.length}件すべてシートと一致しています`);
+  }
+
+  const summary = { checked: jalanList.length, missing: missing.length, drift: drift.length, ghost: ghost.length };
+  Logger.log('突合完了: ' + JSON.stringify(summary));
+  return summary;
+}
+
 function loadExistingReservations(sheet) {
   const data        = sheet.getDataRange().getValues();
   const byBookingNo = new Map();

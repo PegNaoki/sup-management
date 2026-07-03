@@ -1,0 +1,83 @@
+name: Reconcile Jalan Reservations
+
+# 毎日1回、じゃらんの予約一覧を読み取り、GAS(スプレッドシート)と突合する。
+# ・シートに無い予約 → 取りこぼしとして自動追記＋LINE通知
+# ・キャンセルずれ等 → LINE通知
+on:
+  schedule:
+    - cron: "0 21 * * *"   # 毎日 6:00 JST
+  workflow_dispatch: {}
+
+concurrency:
+  group: ota-sync          # 在庫減算と同時にじゃらんへログインしない
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: automation
+        run: npm install
+
+      - name: Install Chromium
+        working-directory: automation
+        run: npx playwright install --with-deps chromium
+
+      - name: Read reservations from jalan
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          HEADLESS:       "true"
+        run: node reconcile-jalan.js
+
+      - name: Post to GAS for reconciliation
+        working-directory: automation
+        env:
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: |
+          if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
+            echo "GAS_RECONCILE_URL / RECONCILE_TOKEN が未設定のため送信スキップ"; exit 1
+          fi
+          jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' jalan-reservations.json > payload.json
+          RES=$(curl -sS -L -X POST "$GAS_RECONCILE_URL" \
+            -H "Content-Type: application/json" \
+            -d @payload.json)
+          echo "GAS応答: $RES"
+          echo "$RES" | jq -e '.ok == true' > /dev/null || { echo "GAS側でエラー"; exit 1; }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconcile-${{ github.run_id }}
+          path: |
+            automation/jalan-reservations.json
+            automation/reconcile-error.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Notify failure to LINE
+        if: failure()
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_USER:  ${{ secrets.LINE_USER_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
+            echo "LINE未設定のため通知スキップ"; exit 0
+          fi
+          TEXT="⚠️【定期突合 失敗】じゃらん予約一覧の読み取りまたは突合に失敗しました\nログ: ${RUN_URL}"
+          PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
+          curl -sS -X POST https://api.line.me/v2/bot/message/push \
+            -H "Authorization: Bearer $LINE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
