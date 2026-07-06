@@ -219,9 +219,15 @@ async function ensureMonthShown(page, compact) {
 
 // hidden input の在庫値を読む
 async function readVal(page, valId) {
-  const v = await page.locator(`#${CSS_escape(valId)}`).inputValue().catch(() => null);
-  if (v === null || v === '') return null;
-  const n = parseInt(v, 10);
+  const loc = page.locator(`#${CSS_escape(valId)}`);
+  const exists = await loc.count();
+  const raw = exists ? await loc.inputValue().catch(() => null) : null;
+  // status も一緒に確認（枠の状態把握用）
+  const statusId = valId.replace(/_val$/, '_status');
+  const rawStatus = await page.locator(`#${CSS_escape(statusId)}`).inputValue().catch(() => null);
+  log('read_val_detail', { exists, raw, status: rawStatus });
+  if (raw === null || raw === '') return null;
+  const n = parseInt(raw, 10);
   return Number.isNaN(n) ? null : n;
 }
 // id に含まれる特殊文字対策（基本は数字と_のみなのでほぼ不要だが念のため）
