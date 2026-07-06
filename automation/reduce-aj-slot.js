@@ -192,26 +192,29 @@ async function openCalendarMenu(page) {
   throw new SlotSyncError('カレンダー管理・在庫管理メニューを開けませんでした');
 }
 
-// 対象日(YYYYMMDD)のセルが表示されるまで月送りする。
-// 月ナビは環境変数 AJ_NEXT_MONTH_SELECTOR で上書き可能。
+// 対象日(YYYYMMDD)のセルが表示されるまで対象月へ移動する。
+// AJは「2026年8月」のような月ボタンを直接クリックして飛ぶ方式。
 async function ensureMonthShown(page, compact) {
-  const nextSel = process.env.AJ_NEXT_MONTH_SELECTOR ||
-    '.fa-chevron-right, .fa-angle-right, a[aria-label*="次"], button[aria-label*="次"]';
-  for (let i = 0; i <= CONFIG.maxMonthNav; i++) {
-    const present = await page.locator(`.day_${compact}`).count();
-    if (present > 0) { log('month_ok', { compact, nav: i }); return; }
-    const next = page.locator(nextSel).first();
-    if (await next.count() === 0 || !(await next.isVisible().catch(() => false))) {
-      // 月見出しの候補も記録して手掛かりに
-      const months = await page.$$eval('[class*="_day"]', els => {
-        const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
-      }).catch(() => []);
-      throw new SlotSyncError(`対象日 ${compact} の月に移動できません（次月ボタン不明）。表示中の月: ${JSON.stringify(months)}`);
-    }
-    await next.click();
-    await page.waitForTimeout(1000);
+  // 既に表示済みならOK
+  if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, nav: 0 }); return; }
+
+  const year  = Number(compact.slice(0, 4));
+  const month = Number(compact.slice(4, 6));
+  // 「YYYY年M月」ボタンを押す（先頭の空白有無に両対応で正規表現）
+  const monthBtn = page.getByRole('button', { name: new RegExp(`${year}\\s*年\\s*${month}\\s*月`) }).first();
+  if (await monthBtn.count() > 0) {
+    await monthBtn.click();
+    await page.waitForTimeout(1200);
+    await page.waitForLoadState('networkidle').catch(() => {});
+    if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, via: 'monthButton' }); return; }
   }
-  throw new SlotSyncError(`対象日 ${compact} に到達できませんでした（月送り上限）`);
+
+  // 見つからない場合は候補をログに出して停止（手掛かり用）
+  const buttons = await page.$$eval('button', els => els.map(e => (e.textContent || '').replace(/\s+/g, '').trim()).filter(t => /\d{4}年\d{1,2}月/.test(t)).slice(0, 20)).catch(() => []);
+  const months = await page.$$eval('[class*="_day"]', els => {
+    const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
+  }).catch(() => []);
+  throw new SlotSyncError(`対象月に移動できません。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(months)}`);
 }
 
 // hidden input の在庫値を読む
