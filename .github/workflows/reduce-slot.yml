@@ -8,10 +8,10 @@ on:
   # 手動テスト用（Actionsタブから実行可能）
   workflow_dispatch:
     inputs:
-      slot_date:      { description: "対象日 (YYYY-MM-DD)", required: true }
-      slot_time:      { description: "対象時間 (HH:MM)",    required: true }
-      slot_decrement: { description: "減らす人数",          required: true }
-      dry_run:        { description: "true=保存しない",     required: false, default: "true" }
+      slot_date:  { description: "対象日 (YYYY-MM-DD)", required: true }
+      slot_time:  { description: "対象時間 (HH:MM)",    required: true }
+      slot_delta: { description: "増減（-2=減 / +2=戻し）", required: true }
+      dry_run:    { description: "true=保存しない",     required: false, default: "true" }
 
 jobs:
   reduce:
@@ -38,8 +38,8 @@ jobs:
           JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
           SLOT_DATE:      ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
           SLOT_TIME:      ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
-          SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement || github.event.inputs.slot_decrement }}
-          SLOT_DELTA:     ${{ github.event.client_payload.slot_delta }}
+          SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement }}
+          SLOT_DELTA:     ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
           DRY_RUN:        ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
           DEDUP_KEY:      ${{ github.event.client_payload.dedup_key }}
           HEADLESS:       "true"
@@ -65,14 +65,14 @@ jobs:
           LINE_USER:  ${{ secrets.LINE_USER_ID }}
           SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
           SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
-          SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement || github.event.inputs.slot_decrement }}
+          SLOT_DELTA: ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
           SOURCE_SITE: ${{ github.event.client_payload.source_site }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
             echo "LINE未設定のため通知スキップ"; exit 0
           fi
-          TEXT="🚨【至急】OTA在庫の連動に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} -${SLOT_DECREMENT}名（発生元: ${SOURCE_SITE}）\n影響: じゃらんの在庫が減っていない可能性 → オーバーブッキング懸念\n👉 じゃらん管理画面で在庫を手動調整してください\nログ: ${RUN_URL}"
+          TEXT="🚨【至急】OTA在庫の連動に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} ${SLOT_DELTA}名（発生元: ${SOURCE_SITE}）\n影響: じゃらんの在庫が減っていない可能性 → オーバーブッキング懸念\n👉 じゃらん管理画面で在庫を手動調整してください\nログ: ${RUN_URL}"
           PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
           curl -sS -X POST https://api.line.me/v2/bot/message/push \
             -H "Authorization: Bearer $LINE_TOKEN" \
