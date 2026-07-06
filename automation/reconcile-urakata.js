@@ -136,19 +136,31 @@ async function main() {
 }
 
 // 参加日 from/to を datepicker で設定する。
-// textbox を順に試し、カレンダーが開くものを from→to の順に使う。
+// ウラカタの検索フォームは「申込日(from,to)」「参加日(from,to)」の順で
+// テキストボックスが並ぶ。参加日は録画上 4,5番目（0始まり）。
+// 環境変数 DATE_BOX_FROM / DATE_BOX_TO で番号を上書き可能。
 async function setDateRange(page, fromDate, toDate) {
-  const boxes = page.getByRole('textbox');
-  const n = await boxes.count();
-  let picked = 0;
-  const targets = [fromDate, toDate];
-  for (let i = 0; i < n && picked < 2; i++) {
-    try { await boxes.nth(i).click({ timeout: 1500 }); } catch (e) { continue; }
-    const nextBtn = page.getByRole('button', { name: 'Next Month' });
-    if (await nextBtn.count() === 0) continue;
-    if (!(await nextBtn.first().isVisible().catch(() => false))) continue;
+  // 全テキストボックスの直前ラベルをログ出力（番号確認用のデバッグ）
+  const labels = await page.$$eval('input[type=text], input:not([type])', (els) => els.map((el, i) => {
+    // 近くの見出しテキストを拾う
+    let lbl = '';
+    const wrap = el.closest('.field, .column, form > div, div');
+    if (wrap) lbl = (wrap.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 30);
+    return `${i}:${lbl}`;
+  }));
+  log('textbox_labels', { labels });
 
-    const t = targets[picked];
+  const fromIdx = parseInt(process.env.DATE_BOX_FROM || '4', 10);
+  const toIdx   = parseInt(process.env.DATE_BOX_TO   || '5', 10);
+  const boxes = page.getByRole('textbox');
+
+  for (const [idx, t, which] of [[fromIdx, fromDate, 'from'], [toIdx, toDate, 'to']]) {
+    await boxes.nth(idx).click();
+    const nextBtn = page.getByRole('button', { name: 'Next Month' });
+    if (!(await nextBtn.first().isVisible().catch(() => false))) {
+      log('date_box_no_calendar', { which, idx });
+      continue;
+    }
     const y = t.getFullYear(), m = t.getMonth() + 1, d = t.getDate();
     let ok = false;
     for (let hop = 0; hop < 24; hop++) {
@@ -158,13 +170,11 @@ async function setDateRange(page, fromDate, toDate) {
         await page.waitForTimeout(600);
         ok = true; break;
       }
-      // from は前へ戻す必要がある場合もあるが、今日起点なので基本は前月ボタン→当月表示。
       await nextBtn.first().click();
       await page.waitForTimeout(300);
     }
-    if (ok) { log('date_set', { which: picked === 0 ? 'from' : 'to', ymd: ymd(t), viaTextbox: i }); picked++; }
+    log(ok ? 'date_set' : 'date_set_fail', { which, ymd: ymd(t), viaTextbox: idx });
   }
-  if (picked < 2) log('date_set_partial', { picked });
 }
 
 main();
