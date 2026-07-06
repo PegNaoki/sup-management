@@ -1,17 +1,20 @@
-name: Reduce OTA Slot
+name: Reduce Urakata Slot
 
-# GAS から repository_dispatch で呼び出される。
-# 予約が入ったとき、じゃらん(ACTIVITY BOARD)の該当枠を減らす。
+# GAS から repository_dispatch(reduce_urakata) で呼び出される。
+# 予約が入ったとき、ウラカタ(=アソビュー=Web予約)の該当枠を増減する。
 on:
   repository_dispatch:
-    types: [reduce_slot]
-  # 手動テスト用（Actionsタブから実行可能）
+    types: [reduce_urakata]
   workflow_dispatch:
     inputs:
       slot_date:  { description: "対象日 (YYYY-MM-DD)", required: true }
       slot_time:  { description: "対象時間 (HH:MM)",    required: true }
       slot_delta: { description: "増減（-2=減 / +2=戻し）", required: true }
       dry_run:    { description: "true=保存しない",     required: false, default: "true" }
+
+concurrency:
+  group: ota-sync-urakata
+  cancel-in-progress: false
 
 jobs:
   reduce:
@@ -31,33 +34,29 @@ jobs:
         working-directory: automation
         run: npx playwright install --with-deps chromium
 
-      - name: Reduce slot (jalan)
+      - name: Adjust slot (urakata)
         working-directory: automation
         env:
-          JALAN_ID:       ${{ secrets.JALAN_ID }}
-          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
-          SLOT_DATE:      ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
-          SLOT_TIME:      ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
-          SLOT_DECREMENT: ${{ github.event.client_payload.slot_decrement }}
-          SLOT_DELTA:     ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
-          DRY_RUN:        ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
-          DEDUP_KEY:      ${{ github.event.client_payload.dedup_key }}
-          HEADLESS:       "true"
-        run: node reduce-jalan-slot.js
+          URKT_ID:       ${{ secrets.URKT_ID }}
+          URKT_PASSWORD: ${{ secrets.URKT_PASSWORD }}
+          SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
+          SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
+          SLOT_DELTA: ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
+          DRY_RUN:    ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
+          HEADLESS:   "true"
+        run: node reduce-urakata-slot.js
 
-      # 実行ログ(JSON Lines)とスクショを成功・失敗どちらでも保存
       - name: Upload run log & screenshots
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: run-artifacts-${{ github.run_id }}
+          name: urakata-artifacts-${{ github.run_id }}
           path: |
-            automation/run-log.jsonl
-            automation/result-screenshot.png
-            automation/error-screenshot.png
+            automation/run-log-urakata.jsonl
+            automation/result-urakata.png
+            automation/error-urakata.png
           if-no-files-found: ignore
 
-      # 在庫連動が失敗したら即LINE ALERT（オーバーブッキング懸念）
       - name: Notify failure to LINE
         if: failure()
         env:
@@ -72,7 +71,7 @@ jobs:
           if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
             echo "LINE未設定のため通知スキップ"; exit 0
           fi
-          TEXT="🚨【至急】OTA在庫の連動に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} ${SLOT_DELTA}名（発生元: ${SOURCE_SITE}）\n影響: じゃらんの在庫が減っていない可能性 → オーバーブッキング懸念\n👉 じゃらん管理画面で在庫を手動調整してください\nログ: ${RUN_URL}"
+          TEXT="🚨【至急】ウラカタ(アソビュー)在庫の連動に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} ${SLOT_DELTA}名（発生元: ${SOURCE_SITE}）\n影響: 在庫が変わっていない可能性 → オーバーブッキング懸念\n👉 ウラカタ管理画面で在庫を手動調整してください\nログ: ${RUN_URL}"
           PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
           curl -sS -X POST https://api.line.me/v2/bot/message/push \
             -H "Authorization: Bearer $LINE_TOKEN" \

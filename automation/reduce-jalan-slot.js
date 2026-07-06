@@ -32,9 +32,10 @@ const CONFIG = {
   id:        process.env.JALAN_ID,
   password:  process.env.JALAN_PASSWORD,
   shopName:  process.env.SHOP_NAME || 'のみくい処 七ツ家',
-  date:      process.env.SLOT_DATE,
+  date:      normalizeYmd(process.env.SLOT_DATE),
   time:      normalizeHm(process.env.SLOT_TIME),
-  decrement: parseInt(process.env.SLOT_DECREMENT || '0', 10),
+  // SLOT_DELTA（符号付き）優先。無ければ従来の SLOT_DECREMENT を減算(-)として扱う。
+  delta:     parseInt(process.env.SLOT_DELTA || `-${process.env.SLOT_DECREMENT || '0'}`, 10),
   dryRun:    process.env.DRY_RUN !== 'false',
   headless:  process.env.HEADLESS !== 'false',
   maxDec:    parseInt(process.env.MAX_DECREMENT || '10', 10),
@@ -74,18 +75,27 @@ function normalizeHm(t) {
   return m ? `${m[1].padStart(2, '0')}:${m[2]}` : String(t).trim();
 }
 
+// "2026-08-14" でも "2026/08/14" でも受け付けて YYYY-MM-DD に正規化
+function normalizeYmd(d) {
+  if (!d) return '';
+  const m = String(d).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (!m) return String(d).trim();
+  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+}
+
 function assertConfig() {
   const miss = [];
-  ['id', 'password', 'date', 'time', 'decrement'].forEach(k => { if (!CONFIG[k]) miss.push(k); });
+  ['id', 'password', 'date', 'time'].forEach(k => { if (!CONFIG[k]) miss.push(k); });
+  if (!CONFIG.delta) miss.push('delta(SLOT_DELTA/SLOT_DECREMENT)');
   if (miss.length) throw new Error(`必須の環境変数が未設定: ${miss.join(', ')}`);
-  if (CONFIG.decrement > CONFIG.maxDec) {
-    throw new Error(`減算数 ${CONFIG.decrement} が上限 ${CONFIG.maxDec} を超えています（安全停止）`);
+  if (Math.abs(CONFIG.delta) > CONFIG.maxDec) {
+    throw new Error(`増減 ${CONFIG.delta} が上限 ±${CONFIG.maxDec} を超えています（安全停止）`);
   }
 }
 
 async function main() {
   assertConfig();
-  log('start', { date: CONFIG.date, time: CONFIG.time, decrement: CONFIG.decrement, dryRun: CONFIG.dryRun, dedupKey: CONFIG.dedupKey });
+  log('start', { date: CONFIG.date, time: CONFIG.time, delta: CONFIG.delta, dryRun: CONFIG.dryRun, dedupKey: CONFIG.dedupKey });
 
   const browser = await chromium.launch({
     headless: CONFIG.headless,
@@ -143,26 +153,26 @@ async function main() {
       throw new SlotSyncError(`対象枠の残数を読み取れませんでした（受付制限/在庫操作対象外、またはセレクタ要確認）`);
     }
 
-    const target = Math.max(0, before - CONFIG.decrement);
-    log('plan', { before, target });
+    const steps = Math.abs(CONFIG.delta);
+    const dir   = CONFIG.delta < 0 ? 'minus' : 'plus';
+    const target = Math.max(0, before + CONFIG.delta);
+    log('plan', { before, target, dir });
 
     if (CONFIG.dryRun) {
       result = 'dry_run';
       log('dry_run', { note: 'クリックせず確認のみ' });
     } else {
-      const minus = cell.locator('.stepper-button-minus');
+      const btn = cell.locator(dir === 'minus' ? '.stepper-button-minus' : '.stepper-button-plus');
       let clicks = 0;
-      for (let i = 0; i < CONFIG.decrement; i++) {
+      for (let i = 0; i < steps; i++) {
         const cur = await readStock(cell);
-        if (cur !== null && cur <= 0) { log('stop_zero', { at: i }); break; }
+        if (dir === 'minus' && cur !== null && cur <= 0) { log('stop_zero', { at: i }); break; }
         // 保存通信(saveSlotCnt)の完了を待ってから次へ。
-        // クリックは非同期でサーバー保存を発火するため、レスポンスを待たないと
-        // ブラウザを閉じた時に保存が中断されて反映されない。
         const saveResp = mng.waitForResponse(
           res => /slot|stock|save|reserve|inventory/i.test(res.url()) && res.request().method() !== 'GET',
           { timeout: 8000 },
         ).catch(() => null);
-        await minus.click();
+        await btn.click();
         const resp = await saveResp;
         log('save_request', { matched: !!resp, url: resp ? resp.url() : null, status: resp ? resp.status() : null });
         clicks++;

@@ -135,12 +135,18 @@ function importEmails_(limit) {
         // 既存行を更新（変更・確定など）
         updateRow(sheet, existingRow, r, msgId, subject, bookingType);
         updateCount++;
+        // リクエスト承認（仮予約→確定）の昇格時も他OTAの枠を減らす。
+        // 同一予約の重複dispatchは dedup_key で防止される。
+        if (bookingType === '確定') {
+          notifySlotReduction_(r);
+        }
       } else {
         // 新規追加
         appendToSheet(sheet, r, msgId, subject, bookingType);
         newCount++;
-        // 新規確定予約 → 他OTAの枠を減らすよう GitHub Actions に通知
-        if (bookingType === '確定' || bookingType === '仮予約') {
+        // 在庫連動は「確定」のみ。仮予約（リクエスト）は物理的に枠が
+        // 埋まっていないため減算しない（承認されて確定メールが来た時に減算）。
+        if (bookingType === '確定') {
           notifySlotReduction_(r);
         }
       }
@@ -302,6 +308,12 @@ function handleCancellation(sheet, rowNum, msgId, subject) {
   };
   const slotInfo = getSlotCapacity(sheet, dateVal, timeVal);
   sendLineNotification(sheet, rowNum, 'キャンセル', r, slotInfo, true);
+
+  // 在庫を戻す（確定だった予約のみ。仮予約のまま消えた予約は元々減らしていない）
+  const prevType = String(rowData[COLUMNS.BOOKING_TYPE - 1] || '');
+  if (prevType === '確定') {
+    restoreSlotForSites_(r);
+  }
 }
 
 // ============================================================
@@ -532,8 +544,35 @@ function checkCapacityWarningsManual() {
 //   GITHUB_REPO   : "PegNaoki/sup-management" のような owner/repo
 //   SLOT_SYNC_ENABLED : "true" のときだけ実行（既定は無効＝安全側）
 // ============================================================
+// 予約サイト名 → 在庫グループの判定。
+// ウラカタ＝アソビュー＝Web予約(satsuki)は在庫が共通なので同じ 'urakata' グループ。
+function siteGroup_(site) {
+  const s = String(site || '');
+  if (s.includes('じゃらん')) return 'jalan';
+  if (s.includes('アクティビティジャパン') || s.includes('アクティビティ・ジャパン')) return 'aj';
+  if (s.includes('アソビュー') || s.includes('ウラカタ') || s.includes('Web予約') || s.includes('satsuki')) return 'urakata';
+  return null; // 直接予約(LINE/インスタ等)は在庫連動の対象外
+}
+
+// 在庫操作を自動化できるサイト（アダプタ実装済み）と、その dispatch イベント種別
+const SYNC_SITES = {
+  jalan:   { event: 'reduce_slot' },
+  urakata: { event: 'reduce_urakata' },
+  // aj: 未実装
+};
+
+// 予約発生時：売り元以外の全サイトの枠を減らす
 function notifySlotReduction_(r) {
-  const props   = PropertiesService.getScriptProperties();
+  notifySlotChange_(r, -1);
+}
+// キャンセル時：売り元以外の全サイトの枠を戻す
+function restoreSlotForSites_(r) {
+  notifySlotChange_(r, +1);
+}
+
+// direction: -1=減算(予約) / +1=戻し(キャンセル)
+function notifySlotChange_(r, direction) {
+  const props = PropertiesService.getScriptProperties();
   if (props.getProperty('SLOT_SYNC_ENABLED') !== 'true') return; // 既定OFF
 
   const token = props.getProperty('GITHUB_TOKEN');
@@ -543,7 +582,6 @@ function notifySlotReduction_(r) {
     return;
   }
 
-  // 日付を YYYY-MM-DD に正規化
   const slotDate = normalizeSlotDate_(r.date);
   const slotTime = String(r.time || '').trim();
   const people   = parseInt(r.people, 10) || 0;
@@ -552,51 +590,54 @@ function notifySlotReduction_(r) {
     return;
   }
 
-  // じゃらん発の予約はじゃらん側を減らす必要がないため除外（自分のサイトは触らない）
-  if (r.site && r.site.includes('じゃらん')) {
-    Logger.log('在庫連携スキップ：じゃらん発の予約のためじゃらん枠は減算不要');
+  // 売り元グループを除いた、自動化可能な全サイトが対象
+  const sourceGroup = siteGroup_(r.site);
+  const targets = Object.keys(SYNC_SITES).filter(g => g !== sourceGroup);
+  if (targets.length === 0) {
+    Logger.log(`在庫連携：対象サイトなし (source=${r.site})`);
     return;
   }
+  const dryRun = props.getProperty('SLOT_SYNC_DRY_RUN') || 'true';
+  const signed = (direction < 0 ? '-' : '+') + people;
 
-  // 二重減算防止：同一予約・同一枠・同一減算の dispatch は一度だけ
-  // 変更で枠/人数が変われば key も変わるため、正当な調整はブロックしない
-  const dedupKey = [r.site || '', r.bookingNo || '', slotDate, slotTime, `-${people}`].join('|');
-  if (isSlotSynced_(dedupKey)) {
-    Logger.log(`在庫連携スキップ：処理済み (${dedupKey})`);
-    return;
-  }
-
-  try {
-    const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
-      method: 'post',
-      contentType: 'application/json',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-      },
-      payload: JSON.stringify({
-        event_type: 'reduce_slot',
-        client_payload: {
-          slot_date:      slotDate,
-          slot_time:      slotTime,
-          slot_decrement: String(people),
-          dry_run:        props.getProperty('SLOT_SYNC_DRY_RUN') || 'true',
-          source_site:    r.site || '',
-          dedup_key:      dedupKey,
-        },
-      }),
-      muteHttpExceptions: true,
-    });
-    const code = res.getResponseCode();
-    if (code === 204) {
-      markSlotSynced_(dedupKey);   // 成功時のみ記録（失敗時は次回再試行される）
-      Logger.log(`在庫連携：GitHub Actions に通知 (${slotDate} ${slotTime} -${people})`);
-    } else {
-      Logger.log(`在庫連携エラー (${code}): ${res.getContentText()}`);
+  targets.forEach(targetGroup => {
+    // 二重処理防止キー（サイト・方向ごとに独立）
+    const dedupKey = [targetGroup, r.site || '', r.bookingNo || '', slotDate, slotTime, signed].join('|');
+    if (isSlotSynced_(dedupKey)) {
+      Logger.log(`在庫連携スキップ：処理済み (${dedupKey})`);
+      return;
     }
-  } catch (e) {
-    Logger.log(`在庫連携エラー: ${e.message}`);
-  }
+    try {
+      const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+        payload: JSON.stringify({
+          event_type: SYNC_SITES[targetGroup].event,
+          client_payload: {
+            slot_date:      slotDate,
+            slot_time:      slotTime,
+            slot_decrement: String(people),   // 後方互換（じゃらん減算用）
+            slot_delta:     signed,           // 符号付き（±両対応）
+            dry_run:        dryRun,
+            source_site:    r.site || '',
+            target_site:    targetGroup,
+            dedup_key:      dedupKey,
+          },
+        }),
+        muteHttpExceptions: true,
+      });
+      const code = res.getResponseCode();
+      if (code === 204) {
+        markSlotSynced_(dedupKey);
+        Logger.log(`在庫連携：${targetGroup} に通知 (${slotDate} ${slotTime} ${signed})`);
+      } else {
+        Logger.log(`在庫連携エラー ${targetGroup} (${code}): ${res.getContentText()}`);
+      }
+    } catch (e) {
+      Logger.log(`在庫連携エラー ${targetGroup}: ${e.message}`);
+    }
+  });
 }
 
 // 在庫連携の処理済みキー管理（スクリプトプロパティに直近N件を保持）
@@ -852,13 +893,89 @@ function doPost(e) {
   }
 
   try {
-    const result = reconcileJalanReservations_(payload);
+    // payload.site で突合先を判定（既定はじゃらん・後方互換）
+    const site = String(payload.site || 'じゃらん');
+    const result = site.includes('ウラカタ')
+      ? reconcileUrakataReservations_(payload)
+      : reconcileJalanReservations_(payload);
     return out({ ok: true, result });
   } catch (err) {
     Logger.log('リコンサイルエラー: ' + err.message);
-    try { postToLine(`🚨【至急】じゃらん突合処理でエラー\n${err.message}`); } catch (_) {}
+    try { postToLine(`🚨【至急】突合処理でエラー\n${err.message}`); } catch (_) {}
     return out({ ok: false, error: err.message });
   }
+}
+
+// ウラカタ(=アソビュー=Web予約)の予約一覧とスプレッドシートを突合する。
+// ウラカタは予約番号を持たないため、キーは「参加日|時間|カナ氏名」。
+function reconcileUrakataReservations_(payload) {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+  // カナ氏名を照合しやすい形に正規化（空白除去・カタカナのみ）
+  const normName = (s) => String(s || '').replace(/[\s　]/g, '');
+  const key = (date, time, kana) => `${date}|${String(time).slice(0,5)}|${normName(kana)}`;
+
+  const urk = (payload.reservations || []);
+  const urkKeys = new Set(urk.map(r => key(r.date, r.time, r.name)));
+
+  // シート側のウラカタ系（アソビュー/ウラカタ/Web予約）有効予約をマップ化
+  const sheetKeys = new Map(); // key -> rowNum
+  for (let i = 1; i < data.length; i++) {
+    const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
+    if (siteGroup_(site) !== 'urakata') continue;
+    const status = String(data[i][COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
+    if (!dateStr || dateStr < today) continue;
+    const timeStr = String(data[i][COLUMNS.TIME - 1] || '').slice(0, 5);
+    const kana    = data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1];
+    sheetKeys.set(key(dateStr, timeStr, kana), i + 1);
+  }
+
+  const missing = []; // ウラカタにあってシートに無い
+  const ghost   = []; // シートにあってウラカタに無い
+
+  // ウラカタ → シート
+  for (const r of urk) {
+    const k = key(r.date, r.time, r.name);
+    if (!sheetKeys.has(k)) {
+      const rec = {
+        site: r.media && r.media.includes('アソビュー') ? 'アソビュー/satsuki' : 'Web予約',
+        bookingNo: '', name: r.name || '', kana: r.name || '',
+        date: String(r.date || '').replace(/-/g, '/'), time: r.time || '',
+        people: r.people || '', peopleDetail: '', amount: r.price || '',
+        payment: '', email: '', phone: r.phone || '',
+        notes: '（定期突合で自動追記：ウラカタ取りこぼし）',
+      };
+      appendToSheet(sheet, rec, `reconcile-urk-${k}`, `【突合検出】ウラカタ ${r.name}`, '確定');
+      notifySlotReduction_(rec);   // 確定として他サイト在庫連動
+      missing.push(`${r.date} ${r.time} ${r.name} ${r.people}名`);
+    }
+  }
+
+  // シート → ウラカタ（消えている＝キャンセルの可能性）
+  for (const [k, rowNum] of sheetKeys.entries()) {
+    if (!urkKeys.has(k)) {
+      ghost.push(`${k.replace(/\|/g, ' ')}（シートでは有効だがウラカタ側に見当たらない）`);
+    }
+  }
+
+  const lines = [];
+  if (missing.length) lines.push(`⚠️ ウラカタ取りこぼし ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (ghost.length)   lines.push(`⚠️ ウラカタ側に無い予約 ${ghost.length}件（キャンセルの可能性・要確認）\n・` + ghost.join('\n・'));
+
+  if (lines.length) {
+    postToLine(`📋【ウラカタ定期突合】問題を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
+  } else {
+    postToLine(`✅【ウラカタ定期突合】OK\n今日以降 ${urk.length}件すべてシートと一致しています`);
+  }
+
+  const summary = { checked: urk.length, missing: missing.length, ghost: ghost.length };
+  Logger.log('ウラカタ突合完了: ' + JSON.stringify(summary));
+  return summary;
 }
 
 function reconcileJalanReservations_(payload) {
@@ -871,9 +988,10 @@ function reconcileJalanReservations_(payload) {
   const jalanByNo = new Map();
   jalanList.forEach(r => { if (r.bookingNo) jalanByNo.set(String(r.bookingNo).trim(), r); });
 
-  const missing = [];   // シートに無い（取りこぼし）
-  const drift   = [];   // じゃらん=キャンセル / シート=有効
-  const ghost   = [];   // シート=有効 / じゃらんに無い
+  const missing  = [];   // シートに無い（取りこぼし）
+  const drift    = [];   // じゃらん=キャンセル / シート=有効
+  const ghost    = [];   // シート=有効 / じゃらんに無い
+  const promoted = [];   // じゃらん=確定 / シート=未対応（確定メール未着）
 
   // --- じゃらん → シート方向 ---
   for (const r of jalanList) {
@@ -899,6 +1017,8 @@ function reconcileJalanReservations_(payload) {
         };
         appendToSheet(sheet, rec, `reconcile-${no}`, `【突合検出】じゃらん ${no}`, r.status === '確定' ? '確定' : '仮予約');
         missing.push(`${r.date} ${r.time} ${no} ${r.people}名`);
+        // 取りこぼしが確定予約なら、他サイトの在庫連動も実行（dedup_keyで二重防止）
+        if (r.status === '確定') notifySlotReduction_(rec);
       }
     } else {
       const sheetStatus = String(data[rowNum - 1][COLUMNS.STATUS - 1] || '');
@@ -906,6 +1026,21 @@ function reconcileJalanReservations_(payload) {
         // じゃらんが明示的に「キャンセル」と言っている → シートも自動でキャンセルに
         cancelSheetRow_(sheet, rowNum, '定期突合：じゃらん側でキャンセル確認');
         drift.push(`${r.date} ${r.time} ${no}（シートを自動でキャンセルに変更済み）`);
+      } else if (r.status === '確定' && ['未対応', '要確認'].includes(sheetStatus)) {
+        // 承認済みなのに確定メールが来なかったケース：
+        // じゃらんが「確定」と言っている → シートを承認済みに昇格＋在庫連動
+        sheet.getRange(rowNum, COLUMNS.STATUS).setValue('承認済');
+        sheet.getRange(rowNum, COLUMNS.BOOKING_TYPE).setValue('確定');
+        const memoCell = sheet.getRange(rowNum, COLUMNS.ACTION_MEMO);
+        const memo = String(memoCell.getValue() || '');
+        const note = '定期突合：じゃらん側で確定を確認（確定メール未着）';
+        memoCell.setValue(memo ? `${memo} / ${note}` : note);
+        notifySlotReduction_({
+          site: 'じゃらんnet', bookingNo: no,
+          date: String(r.date || '').replace(/-/g, '/'),
+          time: r.time || '', people: r.people || '',
+        });
+        promoted.push(`${r.date} ${r.time} ${no}（仮予約→確定に昇格・在庫連動実行）`);
       }
     }
   }
@@ -952,6 +1087,7 @@ function reconcileJalanReservations_(payload) {
   // --- LINE通知 ---
   const lines = [];
   if (missing.length)    lines.push(`⚠️ 取りこぼし検出 ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (promoted.length)   lines.push(`✅ 確定メール未着を検出 ${promoted.length}件\n・` + promoted.join('\n・'));
   if (drift.length)      lines.push(`⚠️ キャンセルずれ ${drift.length}件\n・` + drift.join('\n・'));
   if (ghostLines.length) lines.push(`⚠️ じゃらん側に無い予約 ${ghostLines.length}件\n・` + ghostLines.join('\n・') + ghostNote);
 
@@ -961,7 +1097,7 @@ function reconcileJalanReservations_(payload) {
     postToLine(`✅【じゃらん定期突合】OK\n今日以降 ${jalanList.length}件すべてシートと一致しています`);
   }
 
-  const summary = { checked: jalanList.length, missing: missing.length, drift: drift.length, ghost: ghostLines.length };
+  const summary = { checked: jalanList.length, missing: missing.length, promoted: promoted.length, drift: drift.length, ghost: ghostLines.length };
   Logger.log('突合完了: ' + JSON.stringify(summary));
   return summary;
 }
