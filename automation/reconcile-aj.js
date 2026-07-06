@@ -135,33 +135,9 @@ async function main() {
   }
 }
 
-// 「予約一覧」へ遷移する。録画に合わせ、予約管理メニューを展開→予約一覧をクリック。
+// 「予約一覧」へ遷移する。リンクは /reserve/list（メニュー内に隠れているが実URL）。
 async function openReservationList(page) {
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await page.waitForTimeout(1500); // サイドバー描画待ち
-
-  const link = page.locator('a', { hasText: '予約一覧' }).first();
-
-  // まず親メニュー「予約管理」を展開（複数の当たり方で試す）
-  for (const sel of ['a:has-text("予約管理")', ':text("予約管理")']) {
-    const p = page.locator(sel).first();
-    if (await p.count() > 0) { await p.click().catch(() => {}); await page.waitForTimeout(1200); }
-    if (await link.count() > 0) break;
-  }
-
-  // hrefが実URLなら直接遷移、'#'ならクリックでJS遷移
-  if (await link.count() > 0) {
-    const href = await link.getAttribute('href').catch(() => null);
-    if (href && href !== '#' && !href.startsWith('javascript')) {
-      await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
-    } else {
-      await link.scrollIntoViewIfNeeded().catch(() => {});
-      await link.click({ force: true });
-      await page.waitForLoadState('networkidle').catch(() => {});
-    }
-    return;
-  }
-  throw new Error('予約一覧メニューを開けませんでした');
+  await page.goto(new URL('/reserve/list', page.url()).href, { waitUntil: 'networkidle' });
 }
 
 // 日付入力欄に値をセット。readonly の datepicker のため JS で直接値を書き込む。
