@@ -53,10 +53,10 @@ async function main() {
     await page.waitForLoadState('networkidle');
     log('login_ok');
 
-    // ---------- 2. 予約一覧へ（メニュー展開→リンク or 直接URL・堅牢版） ----------
+    // ---------- 2. 予約一覧へ ----------
     await openReservationList(page);
-    // 予約一覧ページ到達を検索フォームの出現で確認
-    await page.waitForSelector('#performSt02, button:has-text("条件で検索する")', { timeout: 30000 });
+    // 検索フォームは折りたたまれている場合があるため「存在（attached）」で待つ
+    await page.waitForSelector('#performSt02', { state: 'attached', timeout: 30000 });
     log('list_page_opened', { url: page.url() });
 
     // ---------- 3. 実施日 from=今日 / to=今日+RANGE_DAYS で検索 ----------
@@ -64,7 +64,8 @@ async function main() {
     const to = new Date(); to.setDate(today.getDate() + CONFIG.rangeDays);
     await fillDate(page, '#performSt02', today);
     await fillDate(page, '#performEnd02', to);
-    await page.getByRole('button', { name: '条件で検索する' }).click();
+    // 検索ボタンが隠れている可能性があるので force クリック
+    await page.getByRole('button', { name: '条件で検索する' }).click({ force: true });
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1500);
     log('search_done');
