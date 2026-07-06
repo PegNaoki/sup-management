@@ -914,9 +914,15 @@ function reconcileUrakataReservations_(payload) {
   const data  = sheet.getDataRange().getValues();
   const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
 
-  // カナ氏名を照合しやすい形に正規化（空白除去・カタカナのみ）
+  // カナ氏名を照合しやすい形に正規化（空白除去）
   const normName = (s) => String(s || '').replace(/[\s　]/g, '');
-  const key = (date, time, kana) => `${date}|${String(time).slice(0,5)}|${normName(kana)}`;
+  // 時刻正規化：Date型でも文字列でも "HH:MM" に統一
+  const normTime = (t) => {
+    if (t instanceof Date) return Utilities.formatDate(t, 'Asia/Tokyo', 'HH:mm');
+    const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
+    return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
+  };
+  const key = (date, time, kana) => `${date}|${normTime(time)}|${normName(kana)}`;
 
   const urk = (payload.reservations || []);
   const urkKeys = new Set(urk.map(r => key(r.date, r.time, r.name)));
