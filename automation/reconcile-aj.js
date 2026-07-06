@@ -147,18 +147,20 @@ async function main() {
   }
 }
 
-// 日付入力欄に値をセット。type=text の datepicker/直接入力の両対応。
+// 日付入力欄に値をセット。readonly の datepicker のため JS で直接値を書き込む。
 async function fillDate(page, selector, d) {
   const val = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  const el = page.locator(selector).first();
-  if (await el.count() === 0) { log('date_box_missing', { selector }); return; }
-  try {
-    await el.fill(val);
-    await el.press('Escape').catch(() => {});
-    log('date_set', { selector, val });
-  } catch (e) {
-    log('date_set_fail', { selector, message: e.message });
-  }
+  const ok = await page.evaluate(({ sel, v }) => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    el.removeAttribute('readonly');
+    el.value = v;
+    // datepicker/フレームワークに変更を通知
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }, { sel: selector, v: val });
+  log(ok ? 'date_set' : 'date_box_missing', { selector, val });
 }
 
 main();
