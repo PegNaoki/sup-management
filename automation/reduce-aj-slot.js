@@ -1,0 +1,208 @@
+// ============================================================
+// アクティビティジャパン (ptn.activityjapan.com) 在庫枠 自動調整スクリプト
+// ------------------------------------------------------------
+// 画面構造（実DOM確認済み）：
+//   - カレンダー管理・在庫管理ページ
+//   - 行 tr.plan-stock：左端 th.plan-time に <span>10:00</span> /
+//     <span class="plan_course_id">199565</span> / <span class="plan_id">42022</span>
+//   - 各日セル td.day-block：hidden input id="{plan}_{course}_{YYYYMMDD}_val"（在庫数）
+//     と div.day_{YYYYMMDD} > button
+//   - 編集：日セルの button をクリック → spinbutton に絶対値入力 → 「設定」ボタン
+//
+// 環境変数：
+//   AJ_ID / AJ_PASSWORD
+//   SLOT_DATE (YYYY-MM-DD or /) / SLOT_TIME (HH:MM) / SLOT_DELTA (符号付き)
+//   DRY_RUN (既定 true) / HEADLESS (既定 true) / MAX_ABS_DELTA (既定 10)
+// ============================================================
+
+import { chromium } from 'playwright';
+import fs from 'fs';
+
+const CONFIG = {
+  loginUrl: 'https://ptn.activityjapan.com/login',
+  id:       process.env.AJ_ID,
+  password: process.env.AJ_PASSWORD,
+  date:     normalizeYmd(process.env.SLOT_DATE),
+  time:     normalizeHm(process.env.SLOT_TIME),
+  delta:    parseInt(process.env.SLOT_DELTA || '0', 10),
+  dryRun:   process.env.DRY_RUN !== 'false',
+  headless: process.env.HEADLESS !== 'false',
+  maxAbs:   parseInt(process.env.MAX_ABS_DELTA || '10', 10),
+  logPath:  process.env.LOG_PATH || 'run-log-aj.jsonl',
+  maxMonthNav: 14,
+};
+
+const RUN_LOG = [];
+function log(event, data = {}) {
+  const rec = { ts: new Date().toISOString(), event, ...data };
+  RUN_LOG.push(rec);
+  console.log(`${rec.ts} [${event}] ${JSON.stringify(data)}`);
+}
+function flushLog(extra = {}) {
+  try {
+    RUN_LOG.push({ ts: new Date().toISOString(), event: 'summary',
+      date: CONFIG.date, time: CONFIG.time, delta: CONFIG.delta, dryRun: CONFIG.dryRun, ...extra });
+    fs.writeFileSync(CONFIG.logPath, RUN_LOG.map(r => JSON.stringify(r)).join('\n') + '\n');
+  } catch (e) { console.error('ログ書き出し失敗:', e.message); }
+}
+class SlotSyncError extends Error {}
+
+function normalizeHm(t) {
+  if (!t) return '';
+  const m = String(t).match(/(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2, '0')}:${m[2]}` : String(t).trim();
+}
+function normalizeYmd(d) {
+  if (!d) return '';
+  const m = String(d).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (!m) return String(d).trim();
+  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+}
+function ymdCompact(d) { return d.replace(/-/g, ''); } // 2026-08-14 -> 20260814
+
+function assertConfig() {
+  const miss = [];
+  if (!CONFIG.id)       miss.push('AJ_ID');
+  if (!CONFIG.password) miss.push('AJ_PASSWORD');
+  if (!CONFIG.date)     miss.push('SLOT_DATE');
+  if (!CONFIG.time)     miss.push('SLOT_TIME');
+  if (!CONFIG.delta)    miss.push('SLOT_DELTA');
+  if (miss.length) throw new Error(`必須の環境変数が未設定: ${miss.join(', ')}`);
+  if (Math.abs(CONFIG.delta) > CONFIG.maxAbs) {
+    throw new Error(`増減 ${CONFIG.delta} が上限 ±${CONFIG.maxAbs} を超えています（安全停止）`);
+  }
+}
+
+async function main() {
+  assertConfig();
+  log('start', { date: CONFIG.date, time: CONFIG.time, delta: CONFIG.delta, dryRun: CONFIG.dryRun });
+
+  const browser = await chromium.launch({
+    headless: CONFIG.headless,
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
+  });
+  const page = await browser.newPage();
+  let result = 'unknown';
+
+  try {
+    // ---------- 1. ログイン ----------
+    await page.goto(CONFIG.loginUrl, { waitUntil: 'networkidle' });
+    await page.getByRole('textbox', { name: 'ID' }).fill(CONFIG.id);
+    await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
+    await page.getByRole('button', { name: 'ログインする' }).click();
+    await page.waitForLoadState('networkidle');
+    log('login_ok');
+
+    // ---------- 2. カレンダー管理・在庫管理へ ----------
+    await page.getByRole('link', { name: 'カレンダー管理・在庫管理' }).click();
+    await page.waitForLoadState('networkidle');
+    await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
+    log('calendar_opened');
+
+    // ---------- 3. 対象月を表示 ----------
+    const compact = ymdCompact(CONFIG.date);   // 20260814
+    await ensureMonthShown(page, compact);
+
+    // ---------- 4. 対象の行(時間)を特定し plan/course を取得 ----------
+    const ids = await page.evaluate((time) => {
+      const rows = [...document.querySelectorAll('tr.plan-stock')];
+      for (const row of rows) {
+        const t = row.querySelector('.plan-time span');
+        if (t && (t.textContent || '').trim() === time) {
+          const course = row.querySelector('.plan_course_id');
+          const plan   = row.querySelector('.plan_id');
+          return { plan: plan ? plan.textContent.trim() : '', course: course ? course.textContent.trim() : '' };
+        }
+      }
+      return null;
+    }, CONFIG.time);
+    if (!ids) throw new SlotSyncError(`時間 ${CONFIG.time} の行が見つかりません`);
+    log('row_located', ids);
+
+    const valId = `${ids.plan}_${ids.course}_${compact}_val`;
+    const before = await readVal(page, valId);
+    log('val_before', { valId, before });
+    if (before === null) throw new SlotSyncError(`在庫値(${valId})を読み取れませんでした（対象月/枠を要確認）`);
+
+    const target = Math.max(0, before + CONFIG.delta);
+    log('plan', { before, target });
+
+    if (CONFIG.dryRun) {
+      result = 'dry_run';
+      log('dry_run', { note: '変更せず確認のみ' });
+    } else {
+      // ---------- 5. 日セルのボタン→spinbutton→設定 ----------
+      const dayBtn = page.locator(`.day_${compact} button`).first();
+      await dayBtn.click();
+      const spin = page.getByRole('spinbutton').first();
+      await spin.waitFor({ state: 'visible', timeout: 8000 });
+      await spin.fill(String(target));
+      const saveResp = page.waitForResponse(res => res.request().method() !== 'GET', { timeout: 12000 }).catch(() => null);
+      await page.getByRole('button', { name: '設定' }).click();
+      const resp = await saveResp;
+      log('save_request', { matched: !!resp, url: resp ? resp.url() : null, status: resp ? resp.status() : null });
+      await page.waitForTimeout(2000);
+      await page.waitForLoadState('networkidle').catch(() => {});
+
+      // ---------- 6. リロードして検証 ----------
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
+      await ensureMonthShown(page, compact);
+      const after = await readVal(page, valId);
+      log('val_after', { after });
+      if (after !== target) {
+        result = 'not_persisted';
+        await shot(page);
+        throw new SlotSyncError(`保存検証NG：想定(${target})だがリロード後は(${after})`);
+      }
+      result = 'adjusted';
+      log('adjusted', { before, after });
+    }
+    await page.screenshot({ path: 'result-aj.png', fullPage: true }).catch(() => {});
+  } catch (err) {
+    result = result === 'unknown' ? 'error' : result;
+    log('error', { message: err.message, type: err.constructor.name });
+    console.error('❌ エラー:', err.message);
+    await shot(page);
+    process.exitCode = 1;
+  } finally {
+    flushLog({ result });
+    await browser.close();
+  }
+}
+
+// 対象日(YYYYMMDD)のセルが表示されるまで月送りする。
+// 月ナビは環境変数 AJ_NEXT_MONTH_SELECTOR で上書き可能。
+async function ensureMonthShown(page, compact) {
+  const nextSel = process.env.AJ_NEXT_MONTH_SELECTOR ||
+    '.fa-chevron-right, .fa-angle-right, a[aria-label*="次"], button[aria-label*="次"]';
+  for (let i = 0; i <= CONFIG.maxMonthNav; i++) {
+    const present = await page.locator(`.day_${compact}`).count();
+    if (present > 0) { log('month_ok', { compact, nav: i }); return; }
+    const next = page.locator(nextSel).first();
+    if (await next.count() === 0 || !(await next.isVisible().catch(() => false))) {
+      // 月見出しの候補も記録して手掛かりに
+      const months = await page.$$eval('[class*="_day"]', els => {
+        const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
+      }).catch(() => []);
+      throw new SlotSyncError(`対象日 ${compact} の月に移動できません（次月ボタン不明）。表示中の月: ${JSON.stringify(months)}`);
+    }
+    await next.click();
+    await page.waitForTimeout(1000);
+  }
+  throw new SlotSyncError(`対象日 ${compact} に到達できませんでした（月送り上限）`);
+}
+
+// hidden input の在庫値を読む
+async function readVal(page, valId) {
+  const v = await page.locator(`#${CSS_escape(valId)}`).inputValue().catch(() => null);
+  if (v === null || v === '') return null;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
+}
+// id に含まれる特殊文字対策（基本は数字と_のみなのでほぼ不要だが念のため）
+function CSS_escape(s) { return s.replace(/([^\w-])/g, '\\$1'); }
+
+async function shot(p) { await p.screenshot({ path: 'error-aj.png', fullPage: true }).catch(() => {}); }
+
+main();
