@@ -129,17 +129,45 @@ async function main() {
       log('dry_run', { note: '変更せず確認のみ' });
     } else {
       // ---------- 5. セルをクリック→入力→保存 ----------
-      await cell.click();
-      const input = page.locator('.ui.transparent.input input:visible').first();
-      await input.waitFor({ state: 'visible', timeout: 8000 });
+      // 在庫数の表示部分（( n ) の部分）をクリックすると編集モードになる
+      await cell.locator('[data-test=calendarRealtimeLimit]').first().click();
+      await page.waitForTimeout(600);
+
+      // 入力欄はセル内に現れるはず。まずセル内→見つからなければページ全体で探す
+      let input = cell.locator('input:visible').first();
+      if (await input.count() === 0) {
+        input = page.locator('.ui.transparent.input input:visible').first();
+      }
+      const inputVisible = await input.isVisible().catch(() => false);
+      log('editor_state', { inputVisible });
+      if (!inputVisible) {
+        // クリック位置を変えて再試行（セル本体）
+        await cell.click();
+        await page.waitForTimeout(600);
+        input = cell.locator('input:visible').first();
+        if (await input.count() === 0) input = page.locator('.ui.transparent.input input:visible').first();
+        if (!(await input.isVisible().catch(() => false))) {
+          await shot(page);
+          throw new SlotSyncError('編集用の入力欄が開きませんでした（クリック位置のセレクタ要調整）');
+        }
+      }
+
       await input.fill(String(target));
+      const typed = await input.inputValue().catch(() => null);
+      log('input_filled', { typed });
+
+      const saveBtn = page.locator('[data-test="saveBtn"]');
+      const btnEnabled = await saveBtn.isEnabled().catch(() => null);
+      log('save_button', { count: await saveBtn.count(), enabled: btnEnabled });
+
       const saveResp = page.waitForResponse(
         res => res.request().method() !== 'GET',
-        { timeout: 8000 },
+        { timeout: 15000 },
       ).catch(() => null);
-      await page.locator('[data-test="saveBtn"]').click();
+      await saveBtn.click();
       const resp = await saveResp;
       log('save_request', { matched: !!resp, url: resp ? resp.url() : null, status: resp ? resp.status() : null });
+      await page.waitForTimeout(2000);
       await page.waitForLoadState('networkidle').catch(() => {});
 
       // ---------- 6. リロードしてサーバー値で検証 ----------
