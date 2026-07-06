@@ -915,18 +915,14 @@ function reconcileUrakataReservations_(payload) {
   const data  = sheet.getDataRange().getValues();
   const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
 
-  // カナ氏名を照合しやすい形に正規化（空白除去）
+  // 氏名を照合しやすい形に正規化（空白除去）
   const normName = (s) => String(s || '').replace(/[\s　]/g, '');
-  // 時刻正規化：Date型でも文字列でも "HH:MM" に統一
-  const normTime = (t) => {
-    if (t instanceof Date) return Utilities.formatDate(t, 'Asia/Tokyo', 'HH:mm');
-    const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
-    return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
-  };
-  const key = (date, time, kana) => `${date}|${normTime(time)}|${normName(kana)}`;
+  // ウラカタは予約番号を持たないため「参加日｜氏名」で突合する。
+  // 時刻はシート側で空/別形式のことがあり不一致の原因になるためキーに使わない。
+  const key = (date, kana) => `${date}|${normName(kana)}`;
 
   const urk = (payload.reservations || []);
-  const urkKeys = new Set(urk.map(r => key(r.date, r.time, r.name)));
+  const urkKeys = new Set(urk.map(r => key(r.date, r.name)));
 
   // シート側のウラカタ系（アソビュー/ウラカタ/Web予約）有効予約をマップ化
   const sheetKeys = new Map(); // key -> rowNum
@@ -937,9 +933,8 @@ function reconcileUrakataReservations_(payload) {
     if (['キャンセル', '却下'].includes(status)) continue;
     const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
     if (!dateStr || dateStr < today) continue;
-    const timeStr = String(data[i][COLUMNS.TIME - 1] || '').slice(0, 5);
     const kana    = data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1];
-    sheetKeys.set(key(dateStr, timeStr, kana), i + 1);
+    sheetKeys.set(key(dateStr, kana), i + 1);
   }
 
   const missing = []; // ウラカタにあってシートに無い
@@ -947,7 +942,7 @@ function reconcileUrakataReservations_(payload) {
 
   // ウラカタ → シート
   for (const r of urk) {
-    const k = key(r.date, r.time, r.name);
+    const k = key(r.date, r.name);
     if (!sheetKeys.has(k)) {
       const rec = {
         site: r.media && r.media.includes('アソビュー') ? 'アソビュー/satsuki' : 'Web予約',
@@ -1210,11 +1205,6 @@ function cleanupDuplicateRows() {
   const data  = sheet.getDataRange().getValues();
 
   const normName = (s) => String(s || '').replace(/[\s　]/g, '');
-  const normTime = (t) => {
-    if (t instanceof Date) return Utilities.formatDate(t, 'Asia/Tokyo', 'HH:mm');
-    const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
-    return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
-  };
 
   const seen = {};          // key -> 最初に見つけた行番号
   const toDelete = [];      // 削除する行番号（重複の2件目以降）
@@ -1225,13 +1215,13 @@ function cleanupDuplicateRows() {
     const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
     const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
     if (!dateStr) continue;
-    const timeStr = normTime(data[i][COLUMNS.TIME - 1]);
     const kana    = normName(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1]);
     const bookingNo = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
-    // 予約番号があればそれを優先キー、無ければ 日付|時間|氏名
+    // 予約番号があればそれを優先キー、無ければ サイトグループ|日付|氏名
+    // （時刻はシート側で空/別形式のことがあり重複判定を邪魔するため使わない）
     const key = bookingNo
       ? `NO:${bookingNo}`
-      : `${siteGroup_(site) || site}|${dateStr}|${timeStr}|${kana}`;
+      : `${siteGroup_(site) || site}|${dateStr}|${kana}`;
 
     if (seen[key]) toDelete.push(i + 1);
     else seen[key] = i + 1;
