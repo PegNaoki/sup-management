@@ -1201,6 +1201,49 @@ function cancelSheetRow_(sheet, rowNum, reason) {
   }
 }
 
+// 重複行の掃除（定期突合の誤作動で増えた重複を1件だけ残して削除）。
+// 判定キー：予約サイト系グループ｜参加日｜時間｜氏名(カナ優先)。
+// キャンセル/却下行は対象外（残す）。手動実行専用。
+function cleanupDuplicateRows() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+
+  const normName = (s) => String(s || '').replace(/[\s　]/g, '');
+  const normTime = (t) => {
+    if (t instanceof Date) return Utilities.formatDate(t, 'Asia/Tokyo', 'HH:mm');
+    const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
+    return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
+  };
+
+  const seen = {};          // key -> 最初に見つけた行番号
+  const toDelete = [];      // 削除する行番号（重複の2件目以降）
+
+  for (let i = 1; i < data.length; i++) {
+    const status = String(data[i][COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
+    const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
+    if (!dateStr) continue;
+    const timeStr = normTime(data[i][COLUMNS.TIME - 1]);
+    const kana    = normName(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1]);
+    const bookingNo = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
+    // 予約番号があればそれを優先キー、無ければ 日付|時間|氏名
+    const key = bookingNo
+      ? `NO:${bookingNo}`
+      : `${siteGroup_(site) || site}|${dateStr}|${timeStr}|${kana}`;
+
+    if (seen[key]) toDelete.push(i + 1);
+    else seen[key] = i + 1;
+  }
+
+  // 下の行から削除（行番号ズレ防止）
+  toDelete.sort((a, b) => b - a).forEach(rowNum => sheet.deleteRow(rowNum));
+
+  Logger.log(`重複削除：${toDelete.length}行を削除しました（削除行: ${toDelete.sort((a,b)=>a-b).join(', ')}）`);
+  return toDelete.length;
+}
+
 function loadExistingReservations(sheet) {
   const data        = sheet.getDataRange().getValues();
   const byBookingNo = new Map();
