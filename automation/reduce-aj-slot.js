@@ -217,21 +217,18 @@ async function ensureMonthShown(page, compact) {
   throw new SlotSyncError(`対象月に移動できません。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(months)}`);
 }
 
-// hidden input の在庫値を読む
+// hidden input の在庫値を読む（idが数字始まりのため属性セレクタを使う）
 async function readVal(page, valId) {
-  const loc = page.locator(`#${CSS_escape(valId)}`);
+  const loc = page.locator(`input[id="${valId}"]`);
   const exists = await loc.count();
   const raw = exists ? await loc.inputValue().catch(() => null) : null;
-  // status も一緒に確認（枠の状態把握用）
   const statusId = valId.replace(/_val$/, '_status');
-  const rawStatus = await page.locator(`#${CSS_escape(statusId)}`).inputValue().catch(() => null);
+  const rawStatus = await page.locator(`input[id="${statusId}"]`).inputValue().catch(() => null);
   log('read_val_detail', { exists, raw, status: rawStatus });
   if (raw === null || raw === '') return null;
   const n = parseInt(raw, 10);
   return Number.isNaN(n) ? null : n;
 }
-// id に含まれる特殊文字対策（基本は数字と_のみなのでほぼ不要だが念のため）
-function CSS_escape(s) { return s.replace(/([^\w-])/g, '\\$1'); }
 
 async function shot(p) { await p.screenshot({ path: 'error-aj.png', fullPage: true }).catch(() => {}); }
 
