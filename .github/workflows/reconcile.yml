@@ -63,6 +63,32 @@ jobs:
             echo "応答はリダイレクトページ（GAS側の実行結果はLINE通知で確認）"
           fi
 
+      - name: Read reservations from urakata
+        working-directory: automation
+        env:
+          URKT_ID:       ${{ secrets.URKT_ID }}
+          URKT_PASSWORD: ${{ secrets.URKT_PASSWORD }}
+          HEADLESS:      "true"
+        run: node reconcile-urakata.js
+
+      - name: Post urakata to GAS for reconciliation
+        working-directory: automation
+        env:
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: |
+          if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
+            echo "GAS未設定のため送信スキップ"; exit 1
+          fi
+          jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' urakata-reservations.json > payload-urk.json
+          HTTP_CODE=$(curl -sS -o response-urk.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
+            -H "Content-Type: application/json" -d @payload-urk.json)
+          echo "HTTP: $HTTP_CODE"; head -c 500 response-urk.txt; echo
+          if [ "$HTTP_CODE" -ge 400 ]; then echo "GASへの送信失敗"; exit 1; fi
+          if jq -e . response-urk.txt > /dev/null 2>&1; then
+            jq -e '.ok == true' response-urk.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
+          fi
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v5
@@ -70,7 +96,9 @@ jobs:
           name: reconcile-${{ github.run_id }}
           path: |
             automation/jalan-reservations.json
+            automation/urakata-reservations.json
             automation/reconcile-error.png
+            automation/reconcile-urakata-error.png
           if-no-files-found: ignore
           retention-days: 7
 

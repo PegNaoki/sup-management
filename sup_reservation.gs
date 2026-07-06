@@ -893,13 +893,89 @@ function doPost(e) {
   }
 
   try {
-    const result = reconcileJalanReservations_(payload);
+    // payload.site で突合先を判定（既定はじゃらん・後方互換）
+    const site = String(payload.site || 'じゃらん');
+    const result = site.includes('ウラカタ')
+      ? reconcileUrakataReservations_(payload)
+      : reconcileJalanReservations_(payload);
     return out({ ok: true, result });
   } catch (err) {
     Logger.log('リコンサイルエラー: ' + err.message);
-    try { postToLine(`🚨【至急】じゃらん突合処理でエラー\n${err.message}`); } catch (_) {}
+    try { postToLine(`🚨【至急】突合処理でエラー\n${err.message}`); } catch (_) {}
     return out({ ok: false, error: err.message });
   }
+}
+
+// ウラカタ(=アソビュー=Web予約)の予約一覧とスプレッドシートを突合する。
+// ウラカタは予約番号を持たないため、キーは「参加日|時間|カナ氏名」。
+function reconcileUrakataReservations_(payload) {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+  // カナ氏名を照合しやすい形に正規化（空白除去・カタカナのみ）
+  const normName = (s) => String(s || '').replace(/[\s　]/g, '');
+  const key = (date, time, kana) => `${date}|${String(time).slice(0,5)}|${normName(kana)}`;
+
+  const urk = (payload.reservations || []);
+  const urkKeys = new Set(urk.map(r => key(r.date, r.time, r.name)));
+
+  // シート側のウラカタ系（アソビュー/ウラカタ/Web予約）有効予約をマップ化
+  const sheetKeys = new Map(); // key -> rowNum
+  for (let i = 1; i < data.length; i++) {
+    const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
+    if (siteGroup_(site) !== 'urakata') continue;
+    const status = String(data[i][COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
+    if (!dateStr || dateStr < today) continue;
+    const timeStr = String(data[i][COLUMNS.TIME - 1] || '').slice(0, 5);
+    const kana    = data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1];
+    sheetKeys.set(key(dateStr, timeStr, kana), i + 1);
+  }
+
+  const missing = []; // ウラカタにあってシートに無い
+  const ghost   = []; // シートにあってウラカタに無い
+
+  // ウラカタ → シート
+  for (const r of urk) {
+    const k = key(r.date, r.time, r.name);
+    if (!sheetKeys.has(k)) {
+      const rec = {
+        site: r.media && r.media.includes('アソビュー') ? 'アソビュー/satsuki' : 'Web予約',
+        bookingNo: '', name: r.name || '', kana: r.name || '',
+        date: String(r.date || '').replace(/-/g, '/'), time: r.time || '',
+        people: r.people || '', peopleDetail: '', amount: r.price || '',
+        payment: '', email: '', phone: r.phone || '',
+        notes: '（定期突合で自動追記：ウラカタ取りこぼし）',
+      };
+      appendToSheet(sheet, rec, `reconcile-urk-${k}`, `【突合検出】ウラカタ ${r.name}`, '確定');
+      notifySlotReduction_(rec);   // 確定として他サイト在庫連動
+      missing.push(`${r.date} ${r.time} ${r.name} ${r.people}名`);
+    }
+  }
+
+  // シート → ウラカタ（消えている＝キャンセルの可能性）
+  for (const [k, rowNum] of sheetKeys.entries()) {
+    if (!urkKeys.has(k)) {
+      ghost.push(`${k.replace(/\|/g, ' ')}（シートでは有効だがウラカタ側に見当たらない）`);
+    }
+  }
+
+  const lines = [];
+  if (missing.length) lines.push(`⚠️ ウラカタ取りこぼし ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (ghost.length)   lines.push(`⚠️ ウラカタ側に無い予約 ${ghost.length}件（キャンセルの可能性・要確認）\n・` + ghost.join('\n・'));
+
+  if (lines.length) {
+    postToLine(`📋【ウラカタ定期突合】問題を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
+  } else {
+    postToLine(`✅【ウラカタ定期突合】OK\n今日以降 ${urk.length}件すべてシートと一致しています`);
+  }
+
+  const summary = { checked: urk.length, missing: missing.length, ghost: ghost.length };
+  Logger.log('ウラカタ突合完了: ' + JSON.stringify(summary));
+  return summary;
 }
 
 function reconcileJalanReservations_(payload) {
