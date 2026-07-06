@@ -895,9 +895,10 @@ function doPost(e) {
   try {
     // payload.site で突合先を判定（既定はじゃらん・後方互換）
     const site = String(payload.site || 'じゃらん');
-    const result = site.includes('ウラカタ')
-      ? reconcileUrakataReservations_(payload)
-      : reconcileJalanReservations_(payload);
+    let result;
+    if (site.includes('ウラカタ'))            result = reconcileUrakataReservations_(payload);
+    else if (site.includes('アクティビティ')) result = reconcileAjReservations_(payload);
+    else                                       result = reconcileJalanReservations_(payload);
     return out({ ok: true, result });
   } catch (err) {
     Logger.log('リコンサイルエラー: ' + err.message);
@@ -981,6 +982,78 @@ function reconcileUrakataReservations_(payload) {
 
   const summary = { checked: urk.length, missing: missing.length, ghost: ghost.length };
   Logger.log('ウラカタ突合完了: ' + JSON.stringify(summary));
+  return summary;
+}
+
+// アクティビティジャパンの予約一覧とスプレッドシートを突合する（予約番号キー）。
+function reconcileAjReservations_(payload) {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const existing = loadExistingReservations(sheet);
+  const data  = sheet.getDataRange().getValues();
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+  const list = (payload.reservations || []);
+  const byNo = new Map();
+  list.forEach(r => { if (r.bookingNo) byNo.set(String(r.bookingNo).trim(), r); });
+
+  const missing = [], drift = [], promoted = [], ghost = [];
+
+  // AJ → シート
+  for (const r of list) {
+    const no = String(r.bookingNo || '').trim();
+    if (!no) continue;
+    const rowNum = existing.byBookingNo.get(no);
+    if (!rowNum) {
+      if (r.status === '確定' || r.status === '仮予約') {
+        const rec = {
+          site: 'アクティビティジャパン', bookingNo: no, name: r.name || '', kana: '',
+          date: String(r.date || '').replace(/-/g, '/'), time: r.time || '',
+          people: r.people || '', peopleDetail: '', amount: '', payment: '',
+          email: '', phone: '', notes: '（定期突合で自動追記：AJ取りこぼし）',
+        };
+        appendToSheet(sheet, rec, `reconcile-aj-${no}`, `【突合検出】AJ ${no}`, r.status === '確定' ? '確定' : '仮予約');
+        if (r.status === '確定') notifySlotReduction_(rec);
+        missing.push(`${r.date} ${r.time} ${no} ${r.people}名`);
+      }
+    } else {
+      const sheetStatus = String(data[rowNum - 1][COLUMNS.STATUS - 1] || '');
+      if (r.status === 'キャンセル' && !['キャンセル', '却下'].includes(sheetStatus)) {
+        cancelSheetRow_(sheet, rowNum, '定期突合：AJ側でキャンセル確認');
+        drift.push(`${r.date} ${r.time} ${no}（自動キャンセル済み）`);
+      } else if (r.status === '確定' && ['未対応', '要確認'].includes(sheetStatus)) {
+        sheet.getRange(rowNum, COLUMNS.STATUS).setValue('承認済');
+        sheet.getRange(rowNum, COLUMNS.BOOKING_TYPE).setValue('確定');
+        notifySlotReduction_({ site: 'アクティビティジャパン', bookingNo: no,
+          date: String(r.date || '').replace(/-/g, '/'), time: r.time || '', people: r.people || '' });
+        promoted.push(`${r.date} ${r.time} ${no}（確定に昇格・在庫連動）`);
+      }
+    }
+  }
+
+  // シート → AJ（消えている＝キャンセルの可能性）
+  for (let i = 1; i < data.length; i++) {
+    const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
+    if (siteGroup_(site) !== 'aj') continue;
+    const status = String(data[i][COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
+    if (!dateStr || dateStr < today) continue;
+    const no = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
+    if (no && !byNo.has(no)) ghost.push(`${dateStr} ${no}`);
+  }
+
+  const lines = [];
+  if (missing.length)  lines.push(`⚠️ AJ取りこぼし ${missing.length}件（自動追記済み）\n・` + missing.join('\n・'));
+  if (promoted.length) lines.push(`✅ AJ確定メール未着 ${promoted.length}件\n・` + promoted.join('\n・'));
+  if (drift.length)    lines.push(`⚠️ AJキャンセルずれ ${drift.length}件\n・` + drift.join('\n・'));
+  if (ghost.length)    lines.push(`⚠️ AJ側に無い予約 ${ghost.length}件（要確認）\n・` + ghost.join('\n・'));
+
+  if (lines.length) postToLine(`📋【AJ定期突合】問題を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
+  else              postToLine(`✅【AJ定期突合】OK\n今日以降 ${list.length}件すべて一致`);
+
+  const summary = { checked: list.length, missing: missing.length, promoted: promoted.length, drift: drift.length, ghost: ghost.length };
+  Logger.log('AJ突合完了: ' + JSON.stringify(summary));
   return summary;
 }
 
