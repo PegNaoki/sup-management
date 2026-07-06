@@ -89,6 +89,32 @@ jobs:
             jq -e '.ok == true' response-urk.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
           fi
 
+      - name: Read reservations from activity japan
+        working-directory: automation
+        env:
+          AJ_ID:       ${{ secrets.AJ_ID }}
+          AJ_PASSWORD: ${{ secrets.AJ_PASSWORD }}
+          HEADLESS:    "true"
+        run: node reconcile-aj.js
+
+      - name: Post AJ to GAS for reconciliation
+        working-directory: automation
+        env:
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: |
+          if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
+            echo "GAS未設定のため送信スキップ"; exit 1
+          fi
+          jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' aj-reservations.json > payload-aj.json
+          HTTP_CODE=$(curl -sS -o response-aj.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
+            -H "Content-Type: application/json" -d @payload-aj.json)
+          echo "HTTP: $HTTP_CODE"; head -c 500 response-aj.txt; echo
+          if [ "$HTTP_CODE" -ge 400 ]; then echo "GASへの送信失敗"; exit 1; fi
+          if jq -e . response-aj.txt > /dev/null 2>&1; then
+            jq -e '.ok == true' response-aj.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
+          fi
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v5
@@ -97,8 +123,10 @@ jobs:
           path: |
             automation/jalan-reservations.json
             automation/urakata-reservations.json
+            automation/aj-reservations.json
             automation/reconcile-error.png
             automation/reconcile-urakata-error.png
+            automation/reconcile-aj-error.png
           if-no-files-found: ignore
           retention-days: 7
 
