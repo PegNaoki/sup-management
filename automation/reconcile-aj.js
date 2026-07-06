@@ -135,33 +135,30 @@ async function main() {
   }
 }
 
-// 「予約一覧」へ遷移する。メニュー展開に頼らず、リンクのhrefを直接たどる（ヘッドレス対応）。
+// 「予約一覧」へ遷移する。録画に合わせ、予約管理メニューを展開→予約一覧をクリック。
 async function openReservationList(page) {
   await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForTimeout(1500); // サイドバー描画待ち
 
-  // サイドバーの描画を待ちつつ、予約一覧リンクのhrefを取得（最大20秒ポーリング）
-  let href = null;
-  for (let i = 0; i < 20; i++) {
-    href = await page.evaluate(() => {
-      const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').replace(/\s+/g, '').includes('予約一覧'));
-      return a ? a.getAttribute('href') : null;
-    });
-    if (href) break;
-    await page.waitForTimeout(1000);
+  const link = page.locator('a', { hasText: '予約一覧' }).first();
+
+  // まず親メニュー「予約管理」を展開（複数の当たり方で試す）
+  for (const sel of ['a:has-text("予約管理")', ':text("予約管理")']) {
+    const p = page.locator(sel).first();
+    if (await p.count() > 0) { await p.click().catch(() => {}); await page.waitForTimeout(1200); }
+    if (await link.count() > 0) break;
   }
 
-  if (href && href !== '#') {
-    await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
-    return;
-  }
-
-  // hrefが取れない場合はメニュークリックで展開してから遷移を試みる
-  const parent = page.locator('a, li, span', { hasText: '予約管理' }).first();
-  if (await parent.count() > 0) { await parent.click().catch(() => {}); await page.waitForTimeout(1500); }
-  const link = page.getByRole('link', { name: '予約一覧' }).first();
+  // hrefが実URLなら直接遷移、'#'ならクリックでJS遷移
   if (await link.count() > 0) {
-    await link.click({ force: true }).catch(() => {});
-    await page.waitForLoadState('networkidle').catch(() => {});
+    const href = await link.getAttribute('href').catch(() => null);
+    if (href && href !== '#' && !href.startsWith('javascript')) {
+      await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
+    } else {
+      await link.scrollIntoViewIfNeeded().catch(() => {});
+      await link.click({ force: true });
+      await page.waitForLoadState('networkidle').catch(() => {});
+    }
     return;
   }
   throw new Error('予約一覧メニューを開けませんでした');
