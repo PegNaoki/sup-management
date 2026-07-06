@@ -875,6 +875,14 @@ function parseDateTime(dateStr, timeStr) {
 //   2. デプロイ →「ウェブアプリ」として公開（実行ユーザー:自分 / アクセス:全員）
 //   3. 発行されたURLと同じトークンを GitHub Secrets に設定
 // ============================================================
+// ブラウザでこのWebアプリのURLを開いたときに表示される（デプロイ確認用）。
+// 最新コードがデプロイされていれば下のバージョン文字列が見える。
+function doGet(e) {
+  return ContentService
+    .createTextOutput('SUP reconcile endpoint OK / version: date-name-key-v3')
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
 function doPost(e) {
   const out = (obj) => ContentService
     .createTextOutput(JSON.stringify(obj))
