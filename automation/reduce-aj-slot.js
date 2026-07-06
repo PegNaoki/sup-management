@@ -171,24 +171,32 @@ async function main() {
   }
 }
 
-// 折りたたみメニューを開いて「カレンダー管理・在庫管理」へ遷移する
+// 「カレンダー管理・在庫管理」へ遷移する。メニュー展開に頼らずhrefを直接たどる（ヘッドレス対応）。
 async function openCalendarMenu(page) {
-  const link = page.getByRole('link', { name: 'カレンダー管理・在庫管理' });
-  // すでに見えていればそのままクリック
-  if (await link.isVisible().catch(() => false)) { await link.click(); return; }
-  // 親メニュー「カレンダー管理」を開く
-  const parent = page.getByText('カレンダー管理', { exact: true }).first();
-  if (await parent.count() > 0) {
-    await parent.click().catch(() => {});
-    await page.waitForTimeout(800);
+  await page.waitForLoadState('networkidle').catch(() => {});
+  // サイドバー描画を待ちつつ、対象リンクのhrefを取得（最大20秒ポーリング）
+  let href = null;
+  for (let i = 0; i < 20; i++) {
+    href = await page.evaluate(() => {
+      const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').replace(/\s+/g, '').includes('カレンダー管理・在庫管理'));
+      return a ? a.getAttribute('href') : null;
+    });
+    if (href) break;
+    await page.waitForTimeout(1000);
   }
-  if (await link.isVisible().catch(() => false)) { await link.click(); return; }
-  // それでもダメなら href を直接たどる
-  const href = await page.evaluate(() => {
-    const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').includes('カレンダー管理・在庫管理'));
-    return a ? a.getAttribute('href') : null;
-  });
-  if (href) { await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' }); return; }
+  if (href && href !== '#') {
+    await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
+    return;
+  }
+  // hrefが取れない場合はメニュー展開→クリック
+  const parent = page.locator('a, li, span', { hasText: 'カレンダー管理' }).first();
+  if (await parent.count() > 0) { await parent.click().catch(() => {}); await page.waitForTimeout(1500); }
+  const link = page.getByRole('link', { name: 'カレンダー管理・在庫管理' }).first();
+  if (await link.count() > 0) {
+    await link.click({ force: true }).catch(() => {});
+    await page.waitForLoadState('networkidle').catch(() => {});
+    return;
+  }
   throw new SlotSyncError('カレンダー管理・在庫管理メニューを開けませんでした');
 }
 
