@@ -156,9 +156,23 @@ async function main() {
       const typed = await input.inputValue().catch(() => null);
       log('input_filled', { typed });
 
+      // 入力欄からフォーカスを外さないと保存ボタンが有効にならない
+      await input.press('Tab').catch(() => {});
+      await input.blur().catch(() => {});
+      await page.locator('[data-test=courseName]').first().click({ position: { x: 5, y: 5 } }).catch(() => {});
       const saveBtn = page.locator('[data-test="saveBtn"]');
+      await saveBtn.waitFor({ state: 'visible', timeout: 10000 });
+      // 有効になるまで待つ（最大10秒）
+      for (let w = 0; w < 20; w++) {
+        if (await saveBtn.isEnabled().catch(() => false)) break;
+        await page.waitForTimeout(500);
+      }
       const btnEnabled = await saveBtn.isEnabled().catch(() => null);
       log('save_button', { count: await saveBtn.count(), enabled: btnEnabled });
+      if (!btnEnabled) {
+        await shot(page);
+        throw new SlotSyncError('保存ボタンが有効になりませんでした（フォーカス外し方法の要調整）');
+      }
 
       const saveResp = page.waitForResponse(
         res => res.request().method() !== 'GET',
