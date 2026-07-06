@@ -53,23 +53,11 @@ async function main() {
     await page.waitForLoadState('networkidle');
     log('login_ok');
 
-    // ---------- 2. 予約一覧へ（メニュー展開→リンク or 直接URL） ----------
-    const link = page.getByRole('link', { name: '予約一覧' });
-    if (!(await link.isVisible().catch(() => false))) {
-      const parent = page.getByText('予約管理', { exact: true }).first();
-      if (await parent.count() > 0) { await parent.click().catch(() => {}); await page.waitForTimeout(800); }
-    }
-    if (await link.isVisible().catch(() => false)) {
-      await link.click();
-    } else {
-      const href = await page.evaluate(() => {
-        const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').trim() === '予約一覧');
-        return a ? a.getAttribute('href') : null;
-      });
-      if (href) await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
-    }
-    await page.waitForLoadState('networkidle');
-    log('list_page_opened');
+    // ---------- 2. 予約一覧へ（メニュー展開→リンク or 直接URL・堅牢版） ----------
+    await openReservationList(page);
+    // 予約一覧ページ到達を検索フォームの出現で確認
+    await page.waitForSelector('#performSt02, button:has-text("条件で検索する")', { timeout: 30000 });
+    log('list_page_opened', { url: page.url() });
 
     // ---------- 3. 実施日 from=今日 / to=今日+RANGE_DAYS で検索 ----------
     const today = new Date();
@@ -145,6 +133,34 @@ async function main() {
   } finally {
     await browser.close();
   }
+}
+
+// 折りたたみメニューを開いて「予約一覧」へ遷移する（ヘッドレス対応）
+async function openReservationList(page) {
+  await page.waitForLoadState('networkidle').catch(() => {});
+  const link = page.getByRole('link', { name: '予約一覧' });
+
+  // 親メニュー「予約管理」を開く（hover不可のヘッドレスのためクリック）
+  const parent = page.getByText('予約管理', { exact: true }).first();
+  if (await parent.count() > 0) {
+    await parent.click().catch(() => {});
+    await page.waitForTimeout(1000);
+  }
+  if (await link.isVisible().catch(() => false)) {
+    await link.click();
+    await page.waitForLoadState('networkidle').catch(() => {});
+    return;
+  }
+  // href を直接たどる
+  const href = await page.evaluate(() => {
+    const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').trim() === '予約一覧');
+    return a ? a.getAttribute('href') : null;
+  });
+  if (href) {
+    await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
+    return;
+  }
+  throw new Error('予約一覧メニューを開けませんでした');
 }
 
 // 日付入力欄に値をセット。readonly の datepicker のため JS で直接値を書き込む。
