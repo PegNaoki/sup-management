@@ -558,7 +558,7 @@ function siteGroup_(site) {
 const SYNC_SITES = {
   jalan:   { event: 'reduce_slot' },
   urakata: { event: 'reduce_urakata' },
-  // aj: 未実装
+  aj:      { event: 'reduce_aj' },
 };
 
 // 予約発生時：売り元以外の全サイトの枠を減らす
