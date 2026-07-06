@@ -32,7 +32,7 @@ const CONFIG = {
   id:        process.env.JALAN_ID,
   password:  process.env.JALAN_PASSWORD,
   shopName:  process.env.SHOP_NAME || 'のみくい処 七ツ家',
-  date:      process.env.SLOT_DATE,
+  date:      normalizeYmd(process.env.SLOT_DATE),
   time:      normalizeHm(process.env.SLOT_TIME),
   decrement: parseInt(process.env.SLOT_DECREMENT || '0', 10),
   dryRun:    process.env.DRY_RUN !== 'false',
@@ -72,6 +72,14 @@ function normalizeHm(t) {
   if (!t) return '';
   const m = String(t).match(/(\d{1,2}):(\d{2})/);
   return m ? `${m[1].padStart(2, '0')}:${m[2]}` : String(t).trim();
+}
+
+// "2026-08-14" でも "2026/08/14" でも受け付けて YYYY-MM-DD に正規化
+function normalizeYmd(d) {
+  if (!d) return '';
+  const m = String(d).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (!m) return String(d).trim();
+  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
 }
 
 function assertConfig() {
