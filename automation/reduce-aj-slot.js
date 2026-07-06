@@ -94,7 +94,7 @@ async function main() {
     log('login_ok');
 
     // ---------- 2. カレンダー管理・在庫管理へ ----------
-    await page.getByRole('link', { name: 'カレンダー管理・在庫管理' }).click();
+    await openCalendarMenu(page);
     await page.waitForLoadState('networkidle');
     await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
     log('calendar_opened');
@@ -169,6 +169,27 @@ async function main() {
     flushLog({ result });
     await browser.close();
   }
+}
+
+// 折りたたみメニューを開いて「カレンダー管理・在庫管理」へ遷移する
+async function openCalendarMenu(page) {
+  const link = page.getByRole('link', { name: 'カレンダー管理・在庫管理' });
+  // すでに見えていればそのままクリック
+  if (await link.isVisible().catch(() => false)) { await link.click(); return; }
+  // 親メニュー「カレンダー管理」を開く
+  const parent = page.getByText('カレンダー管理', { exact: true }).first();
+  if (await parent.count() > 0) {
+    await parent.click().catch(() => {});
+    await page.waitForTimeout(800);
+  }
+  if (await link.isVisible().catch(() => false)) { await link.click(); return; }
+  // それでもダメなら href を直接たどる
+  const href = await page.evaluate(() => {
+    const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').includes('カレンダー管理・在庫管理'));
+    return a ? a.getAttribute('href') : null;
+  });
+  if (href) { await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' }); return; }
+  throw new SlotSyncError('カレンダー管理・在庫管理メニューを開けませんでした');
 }
 
 // 対象日(YYYYMMDD)のセルが表示されるまで月送りする。
