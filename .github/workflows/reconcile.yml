@@ -5,7 +5,7 @@ name: Reconcile Jalan Reservations
 # ・キャンセルずれ等 → LINE通知
 on:
   schedule:
-    - cron: "0 21 * * *"   # 毎日 6:00 JST
+    - cron: "0 21,3,9 * * *"   # 6:00 / 12:00 / 18:00 JST（確定メール未着の検出を早める）
   workflow_dispatch: {}
 
 concurrency:

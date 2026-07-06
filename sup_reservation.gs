@@ -877,9 +877,10 @@ function reconcileJalanReservations_(payload) {
   const jalanByNo = new Map();
   jalanList.forEach(r => { if (r.bookingNo) jalanByNo.set(String(r.bookingNo).trim(), r); });
 
-  const missing = [];   // シートに無い（取りこぼし）
-  const drift   = [];   // じゃらん=キャンセル / シート=有効
-  const ghost   = [];   // シート=有効 / じゃらんに無い
+  const missing  = [];   // シートに無い（取りこぼし）
+  const drift    = [];   // じゃらん=キャンセル / シート=有効
+  const ghost    = [];   // シート=有効 / じゃらんに無い
+  const promoted = [];   // じゃらん=確定 / シート=未対応（確定メール未着）
 
   // --- じゃらん → シート方向 ---
   for (const r of jalanList) {
@@ -905,6 +906,8 @@ function reconcileJalanReservations_(payload) {
         };
         appendToSheet(sheet, rec, `reconcile-${no}`, `【突合検出】じゃらん ${no}`, r.status === '確定' ? '確定' : '仮予約');
         missing.push(`${r.date} ${r.time} ${no} ${r.people}名`);
+        // 取りこぼしが確定予約なら、他サイトの在庫連動も実行（dedup_keyで二重防止）
+        if (r.status === '確定') notifySlotReduction_(rec);
       }
     } else {
       const sheetStatus = String(data[rowNum - 1][COLUMNS.STATUS - 1] || '');
@@ -912,6 +915,21 @@ function reconcileJalanReservations_(payload) {
         // じゃらんが明示的に「キャンセル」と言っている → シートも自動でキャンセルに
         cancelSheetRow_(sheet, rowNum, '定期突合：じゃらん側でキャンセル確認');
         drift.push(`${r.date} ${r.time} ${no}（シートを自動でキャンセルに変更済み）`);
+      } else if (r.status === '確定' && ['未対応', '要確認'].includes(sheetStatus)) {
+        // 承認済みなのに確定メールが来なかったケース：
+        // じゃらんが「確定」と言っている → シートを承認済みに昇格＋在庫連動
+        sheet.getRange(rowNum, COLUMNS.STATUS).setValue('承認済');
+        sheet.getRange(rowNum, COLUMNS.BOOKING_TYPE).setValue('確定');
+        const memoCell = sheet.getRange(rowNum, COLUMNS.ACTION_MEMO);
+        const memo = String(memoCell.getValue() || '');
+        const note = '定期突合：じゃらん側で確定を確認（確定メール未着）';
+        memoCell.setValue(memo ? `${memo} / ${note}` : note);
+        notifySlotReduction_({
+          site: 'じゃらんnet', bookingNo: no,
+          date: String(r.date || '').replace(/-/g, '/'),
+          time: r.time || '', people: r.people || '',
+        });
+        promoted.push(`${r.date} ${r.time} ${no}（仮予約→確定に昇格・在庫連動実行）`);
       }
     }
   }
@@ -958,6 +976,7 @@ function reconcileJalanReservations_(payload) {
   // --- LINE通知 ---
   const lines = [];
   if (missing.length)    lines.push(`⚠️ 取りこぼし検出 ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (promoted.length)   lines.push(`✅ 確定メール未着を検出 ${promoted.length}件\n・` + promoted.join('\n・'));
   if (drift.length)      lines.push(`⚠️ キャンセルずれ ${drift.length}件\n・` + drift.join('\n・'));
   if (ghostLines.length) lines.push(`⚠️ じゃらん側に無い予約 ${ghostLines.length}件\n・` + ghostLines.join('\n・') + ghostNote);
 
@@ -967,7 +986,7 @@ function reconcileJalanReservations_(payload) {
     postToLine(`✅【じゃらん定期突合】OK\n今日以降 ${jalanList.length}件すべてシートと一致しています`);
   }
 
-  const summary = { checked: jalanList.length, missing: missing.length, drift: drift.length, ghost: ghostLines.length };
+  const summary = { checked: jalanList.length, missing: missing.length, promoted: promoted.length, drift: drift.length, ghost: ghostLines.length };
   Logger.log('突合完了: ' + JSON.stringify(summary));
   return summary;
 }
