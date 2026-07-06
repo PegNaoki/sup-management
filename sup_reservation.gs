@@ -135,12 +135,18 @@ function importEmails_(limit) {
         // 既存行を更新（変更・確定など）
         updateRow(sheet, existingRow, r, msgId, subject, bookingType);
         updateCount++;
+        // リクエスト承認（仮予約→確定）の昇格時も他OTAの枠を減らす。
+        // 同一予約の重複dispatchは dedup_key で防止される。
+        if (bookingType === '確定') {
+          notifySlotReduction_(r);
+        }
       } else {
         // 新規追加
         appendToSheet(sheet, r, msgId, subject, bookingType);
         newCount++;
-        // 新規確定予約 → 他OTAの枠を減らすよう GitHub Actions に通知
-        if (bookingType === '確定' || bookingType === '仮予約') {
+        // 在庫連動は「確定」のみ。仮予約（リクエスト）は物理的に枠が
+        // 埋まっていないため減算しない（承認されて確定メールが来た時に減算）。
+        if (bookingType === '確定') {
           notifySlotReduction_(r);
         }
       }
