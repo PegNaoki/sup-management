@@ -308,6 +308,12 @@ function handleCancellation(sheet, rowNum, msgId, subject) {
   };
   const slotInfo = getSlotCapacity(sheet, dateVal, timeVal);
   sendLineNotification(sheet, rowNum, 'キャンセル', r, slotInfo, true);
+
+  // 在庫を戻す（確定だった予約のみ。仮予約のまま消えた予約は元々減らしていない）
+  const prevType = String(rowData[COLUMNS.BOOKING_TYPE - 1] || '');
+  if (prevType === '確定') {
+    restoreSlotForSites_(r);
+  }
 }
 
 // ============================================================
@@ -538,8 +544,35 @@ function checkCapacityWarningsManual() {
 //   GITHUB_REPO   : "PegNaoki/sup-management" のような owner/repo
 //   SLOT_SYNC_ENABLED : "true" のときだけ実行（既定は無効＝安全側）
 // ============================================================
+// 予約サイト名 → 在庫グループの判定。
+// ウラカタ＝アソビュー＝Web予約(satsuki)は在庫が共通なので同じ 'urakata' グループ。
+function siteGroup_(site) {
+  const s = String(site || '');
+  if (s.includes('じゃらん')) return 'jalan';
+  if (s.includes('アクティビティジャパン') || s.includes('アクティビティ・ジャパン')) return 'aj';
+  if (s.includes('アソビュー') || s.includes('ウラカタ') || s.includes('Web予約') || s.includes('satsuki')) return 'urakata';
+  return null; // 直接予約(LINE/インスタ等)は在庫連動の対象外
+}
+
+// 在庫操作を自動化できるサイト（アダプタ実装済み）と、その dispatch イベント種別
+const SYNC_SITES = {
+  jalan:   { event: 'reduce_slot' },
+  urakata: { event: 'reduce_urakata' },
+  // aj: 未実装
+};
+
+// 予約発生時：売り元以外の全サイトの枠を減らす
 function notifySlotReduction_(r) {
-  const props   = PropertiesService.getScriptProperties();
+  notifySlotChange_(r, -1);
+}
+// キャンセル時：売り元以外の全サイトの枠を戻す
+function restoreSlotForSites_(r) {
+  notifySlotChange_(r, +1);
+}
+
+// direction: -1=減算(予約) / +1=戻し(キャンセル)
+function notifySlotChange_(r, direction) {
+  const props = PropertiesService.getScriptProperties();
   if (props.getProperty('SLOT_SYNC_ENABLED') !== 'true') return; // 既定OFF
 
   const token = props.getProperty('GITHUB_TOKEN');
@@ -549,7 +582,6 @@ function notifySlotReduction_(r) {
     return;
   }
 
-  // 日付を YYYY-MM-DD に正規化
   const slotDate = normalizeSlotDate_(r.date);
   const slotTime = String(r.time || '').trim();
   const people   = parseInt(r.people, 10) || 0;
@@ -558,51 +590,54 @@ function notifySlotReduction_(r) {
     return;
   }
 
-  // じゃらん発の予約はじゃらん側を減らす必要がないため除外（自分のサイトは触らない）
-  if (r.site && r.site.includes('じゃらん')) {
-    Logger.log('在庫連携スキップ：じゃらん発の予約のためじゃらん枠は減算不要');
+  // 売り元グループを除いた、自動化可能な全サイトが対象
+  const sourceGroup = siteGroup_(r.site);
+  const targets = Object.keys(SYNC_SITES).filter(g => g !== sourceGroup);
+  if (targets.length === 0) {
+    Logger.log(`在庫連携：対象サイトなし (source=${r.site})`);
     return;
   }
+  const dryRun = props.getProperty('SLOT_SYNC_DRY_RUN') || 'true';
+  const signed = (direction < 0 ? '-' : '+') + people;
 
-  // 二重減算防止：同一予約・同一枠・同一減算の dispatch は一度だけ
-  // 変更で枠/人数が変われば key も変わるため、正当な調整はブロックしない
-  const dedupKey = [r.site || '', r.bookingNo || '', slotDate, slotTime, `-${people}`].join('|');
-  if (isSlotSynced_(dedupKey)) {
-    Logger.log(`在庫連携スキップ：処理済み (${dedupKey})`);
-    return;
-  }
-
-  try {
-    const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
-      method: 'post',
-      contentType: 'application/json',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-      },
-      payload: JSON.stringify({
-        event_type: 'reduce_slot',
-        client_payload: {
-          slot_date:      slotDate,
-          slot_time:      slotTime,
-          slot_decrement: String(people),
-          dry_run:        props.getProperty('SLOT_SYNC_DRY_RUN') || 'true',
-          source_site:    r.site || '',
-          dedup_key:      dedupKey,
-        },
-      }),
-      muteHttpExceptions: true,
-    });
-    const code = res.getResponseCode();
-    if (code === 204) {
-      markSlotSynced_(dedupKey);   // 成功時のみ記録（失敗時は次回再試行される）
-      Logger.log(`在庫連携：GitHub Actions に通知 (${slotDate} ${slotTime} -${people})`);
-    } else {
-      Logger.log(`在庫連携エラー (${code}): ${res.getContentText()}`);
+  targets.forEach(targetGroup => {
+    // 二重処理防止キー（サイト・方向ごとに独立）
+    const dedupKey = [targetGroup, r.site || '', r.bookingNo || '', slotDate, slotTime, signed].join('|');
+    if (isSlotSynced_(dedupKey)) {
+      Logger.log(`在庫連携スキップ：処理済み (${dedupKey})`);
+      return;
     }
-  } catch (e) {
-    Logger.log(`在庫連携エラー: ${e.message}`);
-  }
+    try {
+      const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+        payload: JSON.stringify({
+          event_type: SYNC_SITES[targetGroup].event,
+          client_payload: {
+            slot_date:      slotDate,
+            slot_time:      slotTime,
+            slot_decrement: String(people),   // 後方互換（じゃらん減算用）
+            slot_delta:     signed,           // 符号付き（±両対応）
+            dry_run:        dryRun,
+            source_site:    r.site || '',
+            target_site:    targetGroup,
+            dedup_key:      dedupKey,
+          },
+        }),
+        muteHttpExceptions: true,
+      });
+      const code = res.getResponseCode();
+      if (code === 204) {
+        markSlotSynced_(dedupKey);
+        Logger.log(`在庫連携：${targetGroup} に通知 (${slotDate} ${slotTime} ${signed})`);
+      } else {
+        Logger.log(`在庫連携エラー ${targetGroup} (${code}): ${res.getContentText()}`);
+      }
+    } catch (e) {
+      Logger.log(`在庫連携エラー ${targetGroup}: ${e.message}`);
+    }
+  });
 }
 
 // 在庫連携の処理済みキー管理（スクリプトプロパティに直近N件を保持）
