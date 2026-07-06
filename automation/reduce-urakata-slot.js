@@ -204,9 +204,10 @@ async function jumpToDate(page, ymd) {
 
 // 対象の「行（コース×時間）×列（日付）」のセルを特定し、data-urkt-target="1" を付与する
 async function locateCell(page) {
-  const [, m, d] = CONFIG.date.split('-').map(Number);
-  return await page.evaluate(({ mm, dd, time, course }) => {
-    const dateLabel = `${mm}/${dd}(`;
+  const [y, m, d] = CONFIG.date.split('-').map(Number);
+  // 曜日照合用（別月の同じ日を誤選択しないための安全チェック）
+  const youbi = ['日', '月', '火', '水', '木', '金', '土'][new Date(y, m - 1, d).getDay()];
+  return await page.evaluate(({ dd, youbi, time, course }) => {
     // 既存マーカーを掃除
     document.querySelectorAll('[data-urkt-target]').forEach(el => el.removeAttribute('data-urkt-target'));
 
@@ -219,30 +220,30 @@ async function locateCell(page) {
     });
     if (rowIdx < 0) return { ok: false, reason: `時間 ${time} の行が見つからない`, rows };
 
-    // --- 列の特定（日付ヘッダ "M/D(" を含むセル） ---
+    // --- 列の特定（data-test=calendarDayHeader：日にち数字＋曜日） ---
+    const headerDivs = [...document.querySelectorAll('[data-test=calendarDayHeader]')];
+    const headers = headerDivs.map(h => (h.textContent || '').replace(/\s+/g, ''));
+    const headerDiv = headerDivs.find(h => {
+      const t = (h.textContent || '').replace(/\s+/g, '');
+      return t === `${dd}${youbi}`;   // 例: "14木"（日にち＋曜日の完全一致）
+    });
+    if (!headerDiv) return { ok: false, reason: `日付 ${dd}(${youbi}) のヘッダが見つからない`, headers, rows };
+    const headerCell = headerDiv.closest('th, td');
+    if (!headerCell) return { ok: false, reason: 'ヘッダのセル要素が特定できない', headers };
+    const headerRowCells = [...headerCell.parentElement.children];
+    const colIdx = headerRowCells.indexOf(headerCell);
+
+    // --- セルの特定（在庫グリッドの同じ行番号・列番号） ---
     const probe = document.querySelector('[data-test=calendarSeatCount]');
     if (!probe) return { ok: false, reason: 'カレンダーセルが見つからない', rows };
     const grid = probe.closest('table');
-
-    // 日付ラベルはグリッド近辺のth/tdにある想定。ドキュメント全体から探しcellIndexを取る
-    const all = [...document.querySelectorAll('th, td')];
-    const headerCell = all.find(el => {
-      const t = (el.textContent || '').replace(/\s+/g, '');
-      return t.startsWith(`${mm}/${dd}(`) && t.length <= 12;
-    });
-    const headers = all.map(el => (el.textContent || '').replace(/\s+/g, ''))
-      .filter(t => /^\d{1,2}\/\d{1,2}\(/.test(t)).slice(0, 20);
-    if (!headerCell) return { ok: false, reason: `日付 ${dateLabel} のヘッダが見つからない`, headers, rows };
-    const colIdx = headerCell.cellIndex;
-
-    // --- セルの特定 ---
     const gridRows = [...grid.querySelectorAll('tbody tr')];
     if (rowIdx >= gridRows.length) return { ok: false, reason: `グリッド行数不足 (${gridRows.length})`, rows };
-    const rowCells = gridRows[rowIdx].cells;
+    const rowCells = [...gridRows[rowIdx].cells];
     if (colIdx >= rowCells.length) return { ok: false, reason: `グリッド列数不足 (${rowCells.length}, col=${colIdx})`, headers };
     rowCells[colIdx].setAttribute('data-urkt-target', '1');
-    return { ok: true, rowIdx, colIdx, header: headerCell.textContent.trim() };
-  }, { mm: m, dd: d, time: CONFIG.time, course: CONFIG.course });
+    return { ok: true, rowIdx, colIdx, header: `${dd}(${youbi})` };
+  }, { dd: d, youbi, time: CONFIG.time, course: CONFIG.course });
 }
 
 // セル内の即時販売在庫 "( 6 )" を読む
