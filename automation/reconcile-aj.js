@@ -136,9 +136,14 @@ async function main() {
   }
 }
 
-// 「予約一覧」へ遷移する。リンクは /reserve/list（メニュー内に隠れているが実URL）。
+// 「予約一覧」へ遷移する。折りたたみメニュー内の a[href="/reserve/list"] を
+// （非表示でも）force クリックする。直接gotoだとSPAが描画しないため。
 async function openReservationList(page) {
-  await page.goto(new URL('/reserve/list', page.url()).href, { waitUntil: 'networkidle' });
+  await page.waitForLoadState('networkidle').catch(() => {});
+  const link = page.locator('a[href="/reserve/list"]').first();
+  await link.waitFor({ state: 'attached', timeout: 20000 });
+  await link.click({ force: true });
+  await page.waitForLoadState('networkidle').catch(() => {});
 }
 
 // 日付入力欄に値をセット。readonly の datepicker のため JS で直接値を書き込む。
