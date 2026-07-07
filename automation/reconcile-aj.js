@@ -169,7 +169,23 @@ async function openReservationList(page) {
   }
   if (!found) throw new Error('予約一覧リンク(a[href="/reserve/list"])が見つかりませんでした');
 
-  await page.locator('a[href="/reserve/list"]').first().click({ force: true });
+  // 予約管理メニューを展開してリンクを表示させる
+  const menu = page.locator('#sidemenuReserve');
+  const link = page.locator('a[href="/reserve/list"]').first();
+  for (let i = 0; i < 5; i++) {
+    if (await link.isVisible().catch(() => false)) break;
+    if (await menu.count() > 0) await menu.click().catch(() => {});
+    await page.waitForTimeout(700);
+  }
+  // 表示されていれば通常クリック、ダメでもJSで直接ナビ
+  if (await link.isVisible().catch(() => false)) {
+    await link.click();
+  } else {
+    await page.evaluate(() => {
+      const a = document.querySelector('a[href="/reserve/list"]');
+      if (a) a.click();
+    });
+  }
   await page.waitForLoadState('networkidle').catch(() => {});
 }
 
