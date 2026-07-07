@@ -41,8 +41,16 @@ async function main() {
   const browser = await chromium.launch({
     headless: CONFIG.headless,
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
+    args: ['--disable-blink-features=AutomationControlled'],
   });
-  const page = await browser.newPage();
+  // ヘッドレス検知（HeadlessChrome UA / navigator.webdriver）を回避して通常Chromeに見せる
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    locale: 'ja-JP',
+    viewport: { width: 1440, height: 900 },
+  });
+  await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
+  const page = await context.newPage();
 
   try {
     // ---------- 1. ログイン ----------
