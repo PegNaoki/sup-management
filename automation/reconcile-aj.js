@@ -136,13 +136,30 @@ async function main() {
   }
 }
 
-// 「予約一覧」へ遷移する。折りたたみメニュー内の a[href="/reserve/list"] を
-// （非表示でも）force クリックする。直接gotoだとSPAが描画しないため。
+// 「予約一覧」へ遷移する。サイドバーの描画を待ち、予約管理メニューを展開してから
+// 予約一覧リンクをクリックする。
 async function openReservationList(page) {
   await page.waitForLoadState('networkidle').catch(() => {});
-  const link = page.locator('a[href="/reserve/list"]').first();
-  await link.waitFor({ state: 'attached', timeout: 20000 });
-  await link.click({ force: true });
+
+  // サイドバーが出るまで待つ（最大25秒ポーリング）＋診断ログ
+  let found = false;
+  for (let i = 0; i < 25; i++) {
+    const diag = await page.evaluate(() => ({
+      url: location.href,
+      hasReserveMenu: !!document.querySelector('#sidemenuReserve'),
+      hasListLink: !!document.querySelector('a[href="/reserve/list"]'),
+      anchorCount: document.querySelectorAll('a').length,
+    }));
+    if (i === 0 || diag.hasListLink) log('nav_diag', diag);
+    if (diag.hasListLink) { found = true; break; }
+    // 予約管理メニューを展開してみる
+    const menu = page.locator('#sidemenuReserve');
+    if (await menu.count() > 0) await menu.click().catch(() => {});
+    await page.waitForTimeout(1000);
+  }
+  if (!found) throw new Error('予約一覧リンク(a[href="/reserve/list"])が見つかりませんでした');
+
+  await page.locator('a[href="/reserve/list"]').first().click({ force: true });
   await page.waitForLoadState('networkidle').catch(() => {});
 }
 
