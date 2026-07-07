@@ -51,7 +51,17 @@ async function main() {
     await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
     await page.getByRole('button', { name: 'ログインする' }).click();
     await page.waitForLoadState('networkidle');
-    log('login_ok');
+    // ログイン成功をURLで確認（/login のままなら失敗）
+    await page.waitForTimeout(1500);
+    if (/\/login/.test(page.url())) {
+      const msg = await page.evaluate(() => {
+        const el = document.querySelector('.alert, .error, .help-block, .invalid-feedback');
+        return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+      }).catch(() => '');
+      await page.screenshot({ path: 'reconcile-aj-error.png', fullPage: true }).catch(() => {});
+      throw new Error(`ログインに失敗しました（ID/パスワードを確認してください）${msg ? ' 画面メッセージ: ' + msg : ''}`);
+    }
+    log('login_ok', { url: page.url() });
 
     // ---------- 2. 予約一覧へ ----------
     await openReservationList(page);
