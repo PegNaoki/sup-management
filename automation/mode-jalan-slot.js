@@ -167,6 +167,25 @@ async function switchOneSlot(mng, task) {
   const beforeMode = await readCellMode(cell);
   log('slot_before', { date, time, mode, beforeMode, meaning: rtMeaning(MODE_TO_RT[beforeMode] || '') });
 
+  // 追加入力欄の調査（変更はしない）。既存状態に関係なく必ずダンプする。
+  if (process.env.DUMP_PANEL === 'true') {
+    const link0 = cell.locator('a.action-link, a').first();
+    await link0.click();
+    const sel0 = mng.locator('select[name="reservationType"]').first();
+    await sel0.waitFor({ state: 'visible', timeout: 10000 });
+    await sel0.selectOption(MODE_TO_RT[mode]);
+    await mng.waitForTimeout(800);
+    const combos = await mng.locator('select').evaluateAll(els => els.map((el, i) => ({
+      i, name: el.name || '', value: el.value,
+      options: [...el.options].map(o => ({ v: o.value, t: (o.textContent||'').trim() })),
+    }))).catch(() => []);
+    const panelHtml = await mng.locator('.panel, [class*="panel"]').first().evaluate(el => el.outerHTML).catch(() => '');
+    log('dump_panel_selects', { count: combos.length, selects: combos });
+    log('dump_panel_html', { html: panelHtml.slice(0, 3000) });
+    await backToCalendar(mng);
+    return { result: 'dumped' };
+  }
+
   if (beforeMode === mode) {
     log('slot_already', { date, time, note: `既に${rtMeaning(targetRt)}` });
     return { result: 'already' };
@@ -181,21 +200,6 @@ async function switchOneSlot(mng, task) {
   await link.click();
   const sel = mng.locator('select[name="reservationType"]').first();
   await sel.waitFor({ state: 'visible', timeout: 10000 });
-
-  // 併用など、追加入力が必要なパネルの中身を調べるためのダンプ（変更はしない）
-  if (process.env.DUMP_PANEL === 'true') {
-    await sel.selectOption(targetRt);            // 目的タイプを選ぶと追加欄が現れる
-    await mng.waitForTimeout(800);
-    const combos = await mng.locator('select').evaluateAll(els => els.map((el, i) => ({
-      i, name: el.name || '', value: el.value,
-      options: [...el.options].map(o => ({ v: o.value, t: (o.textContent||'').trim() })),
-    }))).catch(() => []);
-    const panelHtml = await mng.locator('.panel, [class*="panel"]').first().evaluate(el => el.outerHTML).catch(() => '');
-    log('dump_panel_selects', { count: combos.length, selects: combos });
-    log('dump_panel_html', { html: panelHtml.slice(0, 2500) });
-    return { result: 'dumped' };
-  }
-
   await sel.selectOption(targetRt);
   await mng.getByRole('button', { name: '一括変更する' }).click();
   await mng.waitForLoadState('networkidle').catch(() => {});
