@@ -672,6 +672,191 @@ function normalizeSlotDate_(dateVal) {
   return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
 }
 
+// ============================================================
+// 定員マスターに基づく枠モード同期（バッチ／1日数回実行）
+// ------------------------------------------------------------
+// 方針：
+//   ① 定員（枠数のマスター）は「定員マスター」シートで手動管理（たまに変更）
+//   ② 1日数回、予約一覧の予約状況を集計し、残り枠を算出
+//        残り枠 = 定員 − 予約人数合計（キャンセル/却下除く・全OTA分）
+//   ③ 残り枠が1以下 → 全サイトを「リクエスト」化
+//      残り枠が2以上 → 全サイトを「即予約」化（在庫=残り枠）
+//   状態が前回から変わったときだけ dispatch する（無駄打ち防止）。
+//
+// 「定員マスター」シート（無ければ initCapacityMasterSheet_ で作成）：
+//   A:日付(空=全日共通)  B:時間帯(HH:MM)  C:定員
+//   ・日付を空にした行 → その時間帯の既定の定員（全日共通）
+//   ・日付を入れた行   → その日だけ定員を上書き
+//
+// 必要スクリプトプロパティ：
+//   GITHUB_TOKEN / GITHUB_REPO / MODE_SYNC_ENABLED("true"で有効) / MODE_SYNC_DRY_RUN
+// ============================================================
+
+// 枠モードを自動操作できるサイトと dispatch イベント種別（アダプタ実装済みのみ）
+const MODE_SITES = {
+  aj: { event: 'mode_aj' },
+  // jalan / urakata は切替アダプタ実装後に追加
+};
+
+const CAPACITY_SHEET_NAME = '定員マスター';
+const REQUEST_THRESHOLD   = 1; // 残りがこの数以下でリクエスト化（残1）
+const SLOT_MODE_STATE_PROP = 'SLOT_MODE_STATE';
+
+// 定員マスターシートを用意（無ければヘッダ付きで作成）
+function initCapacityMasterSheet_(ss) {
+  let sheet = ss.getSheetByName(CAPACITY_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CAPACITY_SHEET_NAME);
+    sheet.getRange(1, 1, 1, 3).setValues([['日付(空=全日共通)', '時間帯(HH:MM)', '定員']]);
+    sheet.getRange(2, 1, 2, 3).setValues([
+      ['', '10:00', 8],
+      ['', '13:30', 8],
+    ]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+// 定員マスターを読み込む。{ defaults:{ 'HH:MM':cap }, overrides:{ 'YYYY-MM-DD|HH:MM':cap } }
+function loadCapacityMaster_(ss) {
+  const sheet = initCapacityMasterSheet_(ss);
+  const data  = sheet.getDataRange().getValues();
+  const defaults = {}, overrides = {};
+  for (let i = 1; i < data.length; i++) {
+    const dateRaw = data[i][0];
+    const time    = normalizeSlotTime_(data[i][1]);
+    const cap     = parseInt(data[i][2], 10);
+    if (!time || isNaN(cap)) continue;
+    const date = dateRaw ? normalizeSlotDate_(dateRaw) : '';
+    if (date) overrides[`${date}|${time}`] = cap;
+    else      defaults[time] = cap;
+  }
+  return { defaults, overrides };
+}
+
+function capacityFor_(master, date, time) {
+  const o = master.overrides[`${date}|${time}`];
+  if (o !== undefined) return o;
+  const d = master.defaults[time];
+  return d !== undefined ? d : null;
+}
+
+// 時刻を HH:MM に正規化
+function normalizeSlotTime_(timeVal) {
+  if (timeVal === '' || timeVal === null || timeVal === undefined) return '';
+  if (timeVal instanceof Date) {
+    return `${String(timeVal.getHours()).padStart(2,'0')}:${String(timeVal.getMinutes()).padStart(2,'0')}`;
+  }
+  const m = String(timeVal).match(/(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
+}
+
+// メイン：定員マスターと予約状況から各枠のモードを同期する
+function syncSlotModes() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const master = loadCapacityMaster_(ss);
+  const data  = sheet.getDataRange().getValues();
+  const todayStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+  // 予約一覧から (date|time) ごとに予約人数を集計（キャンセル/却下除く・今日以降）
+  const booked = {}; // { 'YYYY-MM-DD|HH:MM': 合計人数 }
+  for (let i = 1; i < data.length; i++) {
+    const row    = data[i];
+    const status = row[COLUMNS.STATUS - 1];
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const date = normalizeSlotDate_(row[COLUMNS.DATE - 1]);
+    const time = normalizeSlotTime_(row[COLUMNS.TIME - 1]);
+    if (!date || !time || date < todayStr) continue;
+    const p = parseInt(row[COLUMNS.PEOPLE - 1], 10);
+    if (isNaN(p)) continue;
+    const key = `${date}|${time}`;
+    booked[key] = (booked[key] || 0) + p;
+  }
+
+  const state = loadSlotModeState_();
+  const results = [];
+  Object.keys(booked).forEach(key => {
+    const [date, time] = key.split('|');
+    const cap = capacityFor_(master, date, time);
+    if (cap === null) return; // 定員マスターに無い枠はスキップ
+    const remaining = Math.max(cap - booked[key], 0);
+    const desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : 'immediate';
+    results.push({ date, time, cap, booked: booked[key], remaining, desiredMode });
+
+    // 前回と同じモードなら何もしない（無駄打ち防止）
+    if (state[key] === desiredMode) return;
+    notifyModeSwitch_({ slotDate: date, slotTime: time, mode: desiredMode, stock: remaining });
+    state[key] = desiredMode;
+  });
+  saveSlotModeState_(state);
+
+  Logger.log('【枠モード同期】\n' + results.map(r =>
+    `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} → ${r.desiredMode}`).join('\n'));
+  return results;
+}
+
+// 手動実行用：dispatchせず算出結果だけ確認
+function syncSlotModesDryReport() {
+  const before = PropertiesService.getScriptProperties().getProperty('MODE_SYNC_DRY_RUN');
+  PropertiesService.getScriptProperties().setProperty('MODE_SYNC_DRY_RUN', 'true');
+  const r = syncSlotModes();
+  if (before === null) PropertiesService.getScriptProperties().deleteProperty('MODE_SYNC_DRY_RUN');
+  else PropertiesService.getScriptProperties().setProperty('MODE_SYNC_DRY_RUN', before);
+  return r;
+}
+
+// 枠モード切替を GitHub Actions に通知（repository_dispatch）
+function notifyModeSwitch_(opt) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('MODE_SYNC_ENABLED') !== 'true') {
+    Logger.log(`枠モード同期スキップ(無効): ${opt.slotDate} ${opt.slotTime} → ${opt.mode}`);
+    return;
+  }
+  const token = props.getProperty('GITHUB_TOKEN');
+  const repo  = props.getProperty('GITHUB_REPO');
+  if (!token || !repo) { Logger.log('枠モード同期スキップ：GITHUB_TOKEN/GITHUB_REPO 未設定'); return; }
+
+  const dryRun = props.getProperty('MODE_SYNC_DRY_RUN') || 'true';
+  Object.keys(MODE_SITES).forEach(site => {
+    try {
+      const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+        payload: JSON.stringify({
+          event_type: MODE_SITES[site].event,
+          client_payload: {
+            slot_date:   opt.slotDate,
+            slot_time:   opt.slotTime,
+            mode:        opt.mode,
+            stock:       String(opt.stock),
+            dry_run:     dryRun,
+            source_site: 'capacity-sync',
+            target_site: site,
+          },
+        }),
+        muteHttpExceptions: true,
+      });
+      const code = res.getResponseCode();
+      if (code === 204) Logger.log(`枠モード同期：${site} 通知 (${opt.slotDate} ${opt.slotTime} → ${opt.mode} 在庫${opt.stock})`);
+      else Logger.log(`枠モード同期エラー ${site} (${code}): ${res.getContentText()}`);
+    } catch (e) {
+      Logger.log(`枠モード同期エラー ${site}: ${e.message}`);
+    }
+  });
+}
+
+// 枠モードの前回状態（{ 'date|time': 'request'|'immediate' }）
+function loadSlotModeState_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(SLOT_MODE_STATE_PROP);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (e) { return {}; }
+}
+function saveSlotModeState_(state) {
+  PropertiesService.getScriptProperties().setProperty(SLOT_MODE_STATE_PROP, JSON.stringify(state));
+}
+
 function parseEmail(message) {
   const from    = message.getFrom();
   const body    = message.getPlainBody();
