@@ -914,8 +914,9 @@ function syncSlotModes() {
 
     // 前回と同じモードなら何もしない（無駄打ち防止）
     if (state[key] === desiredMode) return;
-    notifyModeSwitch_({ slotDate: date, slotTime: time, mode: desiredMode, stock: remaining });
-    state[key] = desiredMode;
+    // 実際にdispatchできたときだけ状態を記録（無効/失敗時は次回も再試行）
+    const dispatched = notifyModeSwitch_({ slotDate: date, slotTime: time, mode: desiredMode, stock: remaining });
+    if (dispatched) state[key] = desiredMode;
   });
   saveSlotModeState_(state);
 
@@ -935,17 +936,19 @@ function syncSlotModesDryReport() {
 }
 
 // 枠モード切替を GitHub Actions に通知（repository_dispatch）
+// 戻り値：少なくとも1サイトへdispatchできたら true（状態記録の可否判定に使う）
 function notifyModeSwitch_(opt) {
   const props = PropertiesService.getScriptProperties();
   if (props.getProperty('MODE_SYNC_ENABLED') !== 'true') {
     Logger.log(`枠モード同期スキップ(無効): ${opt.slotDate} ${opt.slotTime} → ${opt.mode}`);
-    return;
+    return false;
   }
   const token = props.getProperty('GITHUB_TOKEN');
   const repo  = props.getProperty('GITHUB_REPO');
-  if (!token || !repo) { Logger.log('枠モード同期スキップ：GITHUB_TOKEN/GITHUB_REPO 未設定'); return; }
+  if (!token || !repo) { Logger.log('枠モード同期スキップ：GITHUB_TOKEN/GITHUB_REPO 未設定'); return false; }
 
   const dryRun = props.getProperty('MODE_SYNC_DRY_RUN') || 'true';
+  let anyOk = false;
   Object.keys(MODE_SITES).forEach(site => {
     try {
       const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
@@ -967,12 +970,19 @@ function notifyModeSwitch_(opt) {
         muteHttpExceptions: true,
       });
       const code = res.getResponseCode();
-      if (code === 204) Logger.log(`枠モード同期：${site} 通知 (${opt.slotDate} ${opt.slotTime} → ${opt.mode} 在庫${opt.stock})`);
+      if (code === 204) { anyOk = true; Logger.log(`枠モード同期：${site} 通知 (${opt.slotDate} ${opt.slotTime} → ${opt.mode} 在庫${opt.stock})`); }
       else Logger.log(`枠モード同期エラー ${site} (${code}): ${res.getContentText()}`);
     } catch (e) {
       Logger.log(`枠モード同期エラー ${site}: ${e.message}`);
     }
   });
+  return anyOk;
+}
+
+// 枠モードの記憶状態をリセット（次回同期で全枠を再判定・再通知させる）
+function resetSlotModeState() {
+  PropertiesService.getScriptProperties().deleteProperty(SLOT_MODE_STATE_PROP);
+  Logger.log('枠モード状態をリセットしました。次回 syncSlotModes で再通知されます。');
 }
 
 // 枠モードの前回状態（{ 'date|time': 'request'|'immediate' }）
