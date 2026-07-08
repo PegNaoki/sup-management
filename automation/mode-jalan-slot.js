@@ -70,7 +70,7 @@ function buildTasks() {
     catch (e) { throw new Error(`SLOTS のJSON解析に失敗: ${e.message}`); }
     if (!Array.isArray(raw)) throw new Error('SLOTS はJSON配列である必要があります');
   } else if (process.env.SLOT_DATE) {
-    raw = [{ date: process.env.SLOT_DATE, time: process.env.SLOT_TIME, mode: process.env.MODE }];
+    raw = [{ date: process.env.SLOT_DATE, time: process.env.SLOT_TIME, mode: process.env.MODE, stock: process.env.STOCK }];
   } else {
     throw new Error('SLOTS または SLOT_DATE が未設定です');
   }
