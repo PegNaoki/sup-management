@@ -721,7 +721,7 @@ function initCapacityMasterSheet_(ss) {
     sheet.setFrozenRows(1);
     sheet.setFrozenColumns(1);
     // 使い方メモ
-    sheet.getRange(5, 1).setValue('数字=総枠数 / △=リクエスト強制 / ✗=受付停止 / 空=既定を使用');
+    sheet.getRange(5, 1).setValue('数字=総枠数 / △=リクエスト強制 / ○=即予約強制 / ✗=受付停止 / 空=既定(土日祝=即予約,平日=リクエスト)');
     sheet.getRange(6, 1).setValue('C列以降に日付(例 8/8)を足すとその日だけ上書きできます');
   }
   return sheet;
@@ -778,7 +778,7 @@ function setupCapacityMasterGrid() {
   sheet.setFrozenRows(1);
   sheet.setFrozenColumns(2);
   const memoRow = rows.length + 2;
-  sheet.getRange(memoRow, 1).setValue('数字=総枠数 / △=リクエスト強制 / ✗=受付停止 / 空=既定を使用');
+  sheet.getRange(memoRow, 1).setValue('数字=総枠数 / △=リクエスト強制 / ○=即予約強制 / ✗=受付停止 / 空=既定(土日祝=即予約,平日=リクエスト)');
   Logger.log(`定員マスターを再構築：${times.length}時間帯 × ${dates.length}日（${dates[0].iso}〜${dates[dates.length-1].iso}）`);
   return { times: times.length, days: dates.length };
 }
@@ -813,8 +813,9 @@ function loadCapacityMaster_(ss) {
       if (cell === '' || cell === null || cell === undefined) continue;
       const s = String(cell).trim();
       const fkey = date ? `${date}|${time}` : time;
-      if (/^[△▲]$/.test(s))        { forces[fkey] = 'request'; continue; }
-      if (/^[✗×xX満]$/.test(s))     { forces[fkey] = 'closed';  continue; }
+      if (/^[△▲]$/.test(s))        { forces[fkey] = 'request';   continue; }
+      if (/^[○◯即]$/.test(s))       { forces[fkey] = 'immediate'; continue; }
+      if (/^[✗×xX満]$/.test(s))     { forces[fkey] = 'closed';    continue; }
       const cap = parseInt(s, 10);
       if (isNaN(cap)) continue;
       if (date) overrides[`${date}|${time}`] = cap;
@@ -837,7 +838,31 @@ function normalizeMonthDay_(v) {
   return `${year}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
 }
 
-// その枠の強制指定（△/✗）を返す。日付指定→時間既定の順で探す
+// 日本の祝日セットを取得（YYYY-MM-DD の Set）。範囲を1回だけ読み込む。
+function loadHolidaySet_(fromStr, toStr) {
+  const set = {};
+  try {
+    const cal = CalendarApp.getCalendarById('ja.japanese#holiday@group.v.calendar.google.com');
+    if (!cal) { Logger.log('祝日カレンダー未購読：土日のみで判定'); return set; }
+    const from = new Date(fromStr + 'T00:00:00+09:00');
+    const to   = new Date(toStr   + 'T23:59:59+09:00');
+    cal.getEvents(from, to).forEach(ev => {
+      const d = ev.getAllDayStartDate ? ev.getAllDayStartDate() : ev.getStartTime();
+      set[Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd')] = true;
+    });
+  } catch (e) { Logger.log(`祝日カレンダー取得失敗（土日のみで判定）: ${e.message}`); }
+  return set;
+}
+
+// 基本モード：土日祝=即予約 / 平日=リクエスト
+function baseModeFor_(date, holidaySet) {
+  const d = new Date(date + 'T00:00:00+09:00');
+  const dow = d.getDay(); // 0=日,6=土
+  if (dow === 0 || dow === 6 || holidaySet[date]) return 'immediate';
+  return 'request';
+}
+
+// その枠の強制指定（△/○/✗）を返す。日付指定→時間既定の順で探す
 function forceFor_(master, date, time) {
   if (master.forces[`${date}|${time}`]) return master.forces[`${date}|${time}`];
   if (master.forces[time]) return master.forces[time];
@@ -891,27 +916,38 @@ function syncSlotModes() {
   const slotKeys = new Set(Object.keys(booked));
   Object.keys(master.forces).forEach(fk => { if (fk.includes('|')) slotKeys.add(fk); });
 
+  // 祝日セット（今日〜約5.5ヶ月）を1回だけ読み込む
+  const rangeEnd = Utilities.formatDate(
+    new Date(Date.now() + 170 * 24 * 3600 * 1000), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const holidaySet = loadHolidaySet_(todayStr, rangeEnd);
+
   slotKeys.forEach(key => {
     const [date, time] = key.split('|');
     if (!date || date < todayStr) return;
     const force = forceFor_(master, date, time);
     const cap = capacityFor_(master, date, time);
     const bookedN = booked[key] || 0;
+    // 基本モード：土日祝=即予約 / 平日=リクエスト（初期設定を尊重）
+    const base = baseModeFor_(date, holidaySet);
 
     let desiredMode, remaining;
     if (force === 'closed') {
       // 受付停止：切替アダプタ未対応のため通知せずログのみ
-      results.push({ date, time, cap, booked: bookedN, remaining: 0, desiredMode: 'closed(手動)' });
+      results.push({ date, time, cap, booked: bookedN, base, remaining: 0, desiredMode: 'closed(手動)' });
       return;
     } else if (force === 'request') {
       desiredMode = 'request';
       remaining = cap === null ? 0 : Math.max(cap - bookedN, 0);
+    } else if (force === 'immediate') {
+      desiredMode = 'immediate';
+      remaining = cap === null ? 0 : Math.max(cap - bookedN, 0);
     } else {
       if (cap === null) return; // 定員未設定かつ強制なしはスキップ
       remaining = Math.max(cap - bookedN, 0);
-      desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : 'immediate';
+      // 残1以下はリクエスト、それ以外は「基本モード」に戻す（一律の即予約にしない）
+      desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : base;
     }
-    results.push({ date, time, cap, booked: bookedN, remaining, desiredMode });
+    results.push({ date, time, cap, booked: bookedN, base, remaining, desiredMode });
 
     // 前回と同じモードなら何もしない（無駄打ち防止）
     if (state[key] === desiredMode) return;
@@ -919,7 +955,7 @@ function syncSlotModes() {
   });
 
   Logger.log('【枠モード同期】\n' + results.map(r =>
-    `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} → ${r.desiredMode}`).join('\n'));
+    `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} 基本${r.base || '-'} → ${r.desiredMode}`).join('\n'));
 
   // 変更分を1回のdispatchでまとめて送る（衝突・多重起動を防ぐ）
   if (changes.length > 0) {
