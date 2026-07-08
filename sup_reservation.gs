@@ -727,6 +727,62 @@ function initCapacityMasterSheet_(ss) {
   return sheet;
 }
 
+// 横軸の日付を「今日〜11/30」で張り直す（既存の入力値は保持）。
+// 手動実行して定員マスターのグリッドを整える。
+function setupCapacityMasterGrid() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = initCapacityMasterSheet_(ss);
+
+  // 既存値を退避（時間行・既定値・日付セル・強制記号）
+  const before = loadCapacityMaster_(ss);
+  const data   = sheet.getDataRange().getValues();
+  const times = [];
+  for (let r = 1; r < data.length; r++) {
+    const t = normalizeSlotTime_(data[r][0]);
+    if (t && times.indexOf(t) === -1) times.push(t);
+  }
+  if (times.length === 0) times.push('10:00', '13:30');
+
+  // 今日〜11/30 の日付列を生成
+  const now = new Date();
+  const tz  = 'Asia/Tokyo';
+  const start = new Date(Utilities.formatDate(now, tz, 'yyyy/MM/dd'));
+  const endYear = start.getMonth() >= 11 ? start.getFullYear() + 1 : start.getFullYear();
+  const end = new Date(endYear, 10, 30); // 11月=月index10, 30日
+  const wd = ['日','月','火','水','木','金','土'];
+  const dates = [];
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    dates.push({
+      iso:   Utilities.formatDate(d, tz, 'yyyy-MM-dd'),
+      label: `${d.getMonth()+1}/${d.getDate()}(${wd[d.getDay()]})`,
+    });
+  }
+
+  // 新グリッドを構築：A列=時間, B列=既定, C列以降=日付
+  const header = ['時間\\日付', '既定', ...dates.map(x => x.label)];
+  const rows = [header];
+  times.forEach(time => {
+    const row = [time, before.defaults[time] !== undefined ? before.defaults[time] : ''];
+    dates.forEach(x => {
+      const key = `${x.iso}|${time}`;
+      if (before.forces[key] === 'request') row.push('△');
+      else if (before.forces[key] === 'closed') row.push('✗');
+      else if (before.overrides[key] !== undefined) row.push(before.overrides[key]);
+      else row.push('');
+    });
+    rows.push(row);
+  });
+
+  sheet.clear();
+  sheet.getRange(1, 1, rows.length, header.length).setValues(rows);
+  sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(2);
+  const memoRow = rows.length + 2;
+  sheet.getRange(memoRow, 1).setValue('数字=総枠数 / △=リクエスト強制 / ✗=受付停止 / 空=既定を使用');
+  Logger.log(`定員マスターを再構築：${times.length}時間帯 × ${dates.length}日（${dates[0].iso}〜${dates[dates.length-1].iso}）`);
+  return { times: times.length, days: dates.length };
+}
+
 // グリッドを読み込む。
 //   defaults[time]            … 「既定」列の定員
 //   overrides['date|time']    … 日付列で上書きした定員
