@@ -129,15 +129,19 @@ async function main() {
         const r = await switchOneSlot(page, task);
         results.push({ ...task, ...r });
       } catch (e) {
-        log('slot_error', { date: task.date, time: task.time, mode: task.mode, message: e.message });
-        results.push({ ...task, result: 'error', message: e.message });
+        // 枠がAJに存在しない/月に届かない等のデータ不整合は「スキップ」（全体は失敗にしない）。
+        // 保存検証NGなど運用上の異常だけを「error」として失敗＋通知対象にする。
+        const skip = /見つかりません|移動できません/.test(e.message);
+        log(skip ? 'slot_skip' : 'slot_error', { date: task.date, time: task.time, mode: task.mode, message: e.message });
+        results.push({ ...task, result: skip ? 'skipped' : 'error', message: e.message });
       }
     }
 
-    const ok = results.filter(r => ['switched', 'already', 'dry_run'].includes(r.result)).length;
-    const ng = results.length - ok;
-    log('done', { total: results.length, ok, ng });
-    if (ng > 0) { process.exitCode = 1; }
+    const ok      = results.filter(r => ['switched', 'already', 'dry_run'].includes(r.result)).length;
+    const skipped = results.filter(r => r.result === 'skipped').length;
+    const ng      = results.filter(r => r.result === 'error').length;
+    log('done', { total: results.length, ok, skipped, ng });
+    if (ng > 0) { process.exitCode = 1; } // 本当の異常時のみ失敗（🚨通知が飛ぶ）
     await page.screenshot({ path: 'result-aj-mode.png', fullPage: true }).catch(() => {});
   } catch (err) {
     log('error', { message: err.message, type: err.constructor.name });
@@ -236,10 +240,29 @@ async function openCalendarMenu(page) {
 async function ensureMonthShown(page, compact) {
   if (await page.locator(`.day_${compact}`).count() > 0) return;
   const year = Number(compact.slice(0, 4)), month = Number(compact.slice(4, 6));
-  const monthBtn = page.getByRole('button', { name: new RegExp(`${year}\\s*年\\s*${month}\\s*月`) }).first();
+  const monthRe = new RegExp(`${year}\\s*年\\s*${month}\\s*月`);
+
+  // まず対象月ボタンが直接あれば押す
+  const monthBtn = page.getByRole('button', { name: monthRe }).first();
   if (await monthBtn.count() > 0) {
     await monthBtn.click(); await page.waitForTimeout(1200); await page.waitForLoadState('networkidle').catch(() => {});
     if (await page.locator(`.day_${compact}`).count() > 0) return;
+  }
+
+  // 直接ボタンが無ければ「次月」送りを繰り返して対象月まで進める（best-effort）
+  for (let i = 0; i < 8; i++) {
+    const next = page.locator(
+      'a[aria-label*="次"], button[aria-label*="次"], .fc-next-button, a:has-text("次の月"), button:has-text("次の月"), a:has-text("›"), button:has-text("›")'
+    ).first();
+    if (await next.count() === 0) break;
+    await next.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(1000); await page.waitForLoadState('networkidle').catch(() => {});
+    if (await page.locator(`.day_${compact}`).count() > 0) return;
+    const mb = page.getByRole('button', { name: monthRe }).first();
+    if (await mb.count() > 0) {
+      await mb.click(); await page.waitForTimeout(1000); await page.waitForLoadState('networkidle').catch(() => {});
+      if (await page.locator(`.day_${compact}`).count() > 0) return;
+    }
   }
   throw new SlotSyncError(`対象月に移動できません（${compact}）`);
 }
