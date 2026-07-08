@@ -83,7 +83,10 @@ function buildTasks() {
     if (!MODE_TO_RT[mode]) throw new Error(`slots[${i}]: mode は request|immediate|combination`);
     if (mode === 'combination' && !stock) throw new Error(`slots[${i}]: 併用には stock(定員) が必要`);
     return { date, time, mode, stock };
-  });
+  })
+  // 日付昇順に処理する。カレンダーは「次へ」しか無く前の月へ戻れないため、
+  // 昇順にすることで前進のみで全枠に到達できる（バッチ時の取りこぼし防止）。
+  .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 }
 
 function assertConfig() {
@@ -176,6 +179,12 @@ async function switchOneSlot(mng, task) {
   const beforeMode = await readCellMode(cell);
   log('slot_before', { date, time, mode, beforeMode, meaning: rtMeaning(MODE_TO_RT[beforeMode] || '') });
 
+  // 現在モードが読めない＝セル描画待ち失敗など。全体を落とさずスキップ（誤通知防止）。
+  if (beforeMode === null) {
+    log('slot_skip', { date, time, note: '現在モードを読めずスキップ（要確認）' });
+    return { result: 'skipped' };
+  }
+
   // 追加入力欄の調査（変更はしない）。既存状態に関係なく必ずダンプする。
   if (process.env.DUMP_PANEL === 'true') {
     const link0 = cell.locator('a.action-link, a').first();
@@ -258,8 +267,14 @@ async function getCell(mng, date, time) {
 // セルの sales-status アイコンから現在モードを判定：
 //   icon-confirmed=即時予約(immediate) / icon-unconfirmed=リクエスト(request) / icon-combination=併用
 async function readCellMode(cell) {
-  const cls = await cell.locator('.sales-status-wrapper [class^="icon-"]').first()
-    .getAttribute('class').catch(() => null);
+  // アイコンの描画が遅れることがあるため数回リトライ
+  let cls = null;
+  for (let i = 0; i < 6; i++) {
+    cls = await cell.locator('.sales-status-wrapper [class^="icon-"]').first()
+      .getAttribute('class').catch(() => null);
+    if (cls) break;
+    await cell.page().waitForTimeout(500);
+  }
   if (!cls) return null;
   const s = cls.toLowerCase();
   if (s.includes('combination'))  return 'combination';
