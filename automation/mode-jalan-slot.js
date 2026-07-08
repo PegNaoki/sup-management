@@ -78,9 +78,11 @@ function buildTasks() {
     const date = normalizeYmd(s.date);
     const time = normalizeHm(s.time);
     const mode = String(s.mode || '').toLowerCase();
+    const stock = parseInt(s.stock || 0, 10);
     if (!date || !time) throw new Error(`slots[${i}]: date/time が不正 (${JSON.stringify(s)})`);
-    if (!MODE_TO_RT[mode]) throw new Error(`slots[${i}]: mode は request|immediate`);
-    return { date, time, mode };
+    if (!MODE_TO_RT[mode]) throw new Error(`slots[${i}]: mode は request|immediate|combination`);
+    if (mode === 'combination' && !stock) throw new Error(`slots[${i}]: 併用には stock(定員) が必要`);
+    return { date, time, mode, stock };
   });
 }
 
@@ -159,7 +161,7 @@ async function main() {
 
 // 1枠の予約タイプを切り替える。mng はログイン済み・予約販売管理を開いた状態。
 async function switchOneSlot(mng, task) {
-  const { date, time, mode } = task;
+  const { date, time, mode, stock } = task;
   const targetRt = MODE_TO_RT[mode];
 
   // 1. 対象セルから現在の予約タイプ（アイコン）を読む
@@ -207,6 +209,17 @@ async function switchOneSlot(mng, task) {
   const sel = mng.locator('select[name="reservationType"]').first();
   await sel.waitFor({ state: 'visible', timeout: 10000 });
   await sel.selectOption(targetRt);
+
+  // 併用は「受付制限を変更する＋定員の数値」も必要
+  if (mode === 'combination') {
+    const limitSel = mng.locator('select').filter({ has: mng.getByRole('option', { name: '変更する', exact: true }) }).first();
+    await limitSel.selectOption('1');
+    await mng.waitForTimeout(400);
+    const numInput = mng.locator('input.js-panel-textBox-input').first();
+    await numInput.waitFor({ state: 'visible', timeout: 8000 });
+    await numInput.fill(String(stock));
+  }
+
   await mng.getByRole('button', { name: '一括変更する' }).click();
   await mng.waitForLoadState('networkidle').catch(() => {});
   await mng.waitForTimeout(1500);
