@@ -683,10 +683,16 @@ function normalizeSlotDate_(dateVal) {
 //      残り枠が2以上 → 全サイトを「即予約」化（在庫=残り枠）
 //   状態が前回から変わったときだけ dispatch する（無駄打ち防止）。
 //
-// 「定員マスター」シート（無ければ initCapacityMasterSheet_ で作成）：
-//   A:日付(空=全日共通)  B:時間帯(HH:MM)  C:定員
-//   ・日付を空にした行 → その時間帯の既定の定員（全日共通）
-//   ・日付を入れた行   → その日だけ定員を上書き
+// 「定員マスター」シート（AJ管理画面ライクなグリッド。無ければ自動作成）：
+//   1行目：A1=ラベル / B1="既定" / C1以降=日付（8/8 など）
+//   A列 2行目以降：開始時間（HH:MM）
+//   セルの値：
+//     数字 → その日・その時間の総枠数（定員）
+//     △    → その枠をリクエスト強制
+//     ✗/×/満 → 受付停止（満席扱い・現状は手動対応のログのみ）
+//     空    → 既定列の定員を使う
+//   「既定」列に普段の定員（例:8）を入れておけば全日共通。特定日だけ
+//   日付列を足して数字/△/✗で上書きする。
 //
 // 必要スクリプトプロパティ：
 //   GITHUB_TOKEN / GITHUB_REPO / MODE_SYNC_ENABLED("true"で有効) / MODE_SYNC_DRY_RUN
@@ -702,36 +708,84 @@ const CAPACITY_SHEET_NAME = '定員マスター';
 const REQUEST_THRESHOLD   = 1; // 残りがこの数以下でリクエスト化（残1）
 const SLOT_MODE_STATE_PROP = 'SLOT_MODE_STATE';
 
-// 定員マスターシートを用意（無ければヘッダ付きで作成）
+// 定員マスターシート（グリッド）を用意。無ければ雛形を作成
 function initCapacityMasterSheet_(ss) {
   let sheet = ss.getSheetByName(CAPACITY_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CAPACITY_SHEET_NAME);
-    sheet.getRange(1, 1, 1, 3).setValues([['日付(空=全日共通)', '時間帯(HH:MM)', '定員']]);
-    sheet.getRange(2, 1, 2, 3).setValues([
-      ['', '10:00', 8],
-      ['', '13:30', 8],
+    sheet.getRange(1, 1, 3, 2).setValues([
+      ['時間\\日付', '既定'],
+      ['10:00', 8],
+      ['13:30', 8],
     ]);
     sheet.setFrozenRows(1);
+    sheet.setFrozenColumns(1);
+    // 使い方メモ
+    sheet.getRange(5, 1).setValue('数字=総枠数 / △=リクエスト強制 / ✗=受付停止 / 空=既定を使用');
+    sheet.getRange(6, 1).setValue('C列以降に日付(例 8/8)を足すとその日だけ上書きできます');
   }
   return sheet;
 }
 
-// 定員マスターを読み込む。{ defaults:{ 'HH:MM':cap }, overrides:{ 'YYYY-MM-DD|HH:MM':cap } }
+// グリッドを読み込む。
+//   defaults[time]            … 「既定」列の定員
+//   overrides['date|time']    … 日付列で上書きした定員
+//   forces['date|time' or 'time'] … △=request / ✗=closed の強制指定
 function loadCapacityMaster_(ss) {
   const sheet = initCapacityMasterSheet_(ss);
   const data  = sheet.getDataRange().getValues();
-  const defaults = {}, overrides = {};
-  for (let i = 1; i < data.length; i++) {
-    const dateRaw = data[i][0];
-    const time    = normalizeSlotTime_(data[i][1]);
-    const cap     = parseInt(data[i][2], 10);
-    if (!time || isNaN(cap)) continue;
-    const date = dateRaw ? normalizeSlotDate_(dateRaw) : '';
-    if (date) overrides[`${date}|${time}`] = cap;
-    else      defaults[time] = cap;
+  const defaults = {}, overrides = {}, forces = {};
+  if (data.length < 2) return { defaults, overrides, forces };
+
+  // ヘッダ行：各列がどの日付か（B列以降）。"既定" は date='' 扱い
+  const header = data[0];
+  const colDate = [];
+  for (let c = 1; c < header.length; c++) {
+    const h = header[c];
+    if (h === '' || h === null || h === undefined) { colDate[c] = null; continue; }
+    if (String(h).replace(/\s/g, '') === '既定') { colDate[c] = ''; continue; }
+    colDate[c] = normalizeSlotDate_(h) || normalizeMonthDay_(h);
   }
-  return { defaults, overrides };
+
+  for (let r = 1; r < data.length; r++) {
+    const time = normalizeSlotTime_(data[r][0]);
+    if (!time) continue; // 時間行でなければ（メモ行など）スキップ
+    for (let c = 1; c < data[r].length; c++) {
+      const date = colDate[c];
+      if (date === null || date === undefined) continue;
+      const cell = data[r][c];
+      if (cell === '' || cell === null || cell === undefined) continue;
+      const s = String(cell).trim();
+      const fkey = date ? `${date}|${time}` : time;
+      if (/^[△▲]$/.test(s))        { forces[fkey] = 'request'; continue; }
+      if (/^[✗×xX満]$/.test(s))     { forces[fkey] = 'closed';  continue; }
+      const cap = parseInt(s, 10);
+      if (isNaN(cap)) continue;
+      if (date) overrides[`${date}|${time}`] = cap;
+      else      defaults[time] = cap;
+    }
+  }
+  return { defaults, overrides, forces };
+}
+
+// 「8/8」「8月8日」等を今年基準で YYYY-MM-DD に（年跨ぎは過去なら翌年扱い）
+function normalizeMonthDay_(v) {
+  const m = String(v).match(/(\d{1,2})[\/月](\d{1,2})/);
+  if (!m) return '';
+  const now = new Date();
+  let year = now.getFullYear();
+  const mm = parseInt(m[1], 10), dd = parseInt(m[2], 10);
+  const cand = `${year}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+  const todayStr = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
+  if (cand < todayStr) year += 1; // 既に過去なら翌年の同月日
+  return `${year}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+}
+
+// その枠の強制指定（△/✗）を返す。日付指定→時間既定の順で探す
+function forceFor_(master, date, time) {
+  if (master.forces[`${date}|${time}`]) return master.forces[`${date}|${time}`];
+  if (master.forces[time]) return master.forces[time];
+  return null;
 }
 
 function capacityFor_(master, date, time) {
@@ -776,13 +830,31 @@ function syncSlotModes() {
 
   const state = loadSlotModeState_();
   const results = [];
-  Object.keys(booked).forEach(key => {
+  // 集計対象は「予約がある枠」＋「マスターで強制指定した枠」の和集合
+  const slotKeys = new Set(Object.keys(booked));
+  Object.keys(master.forces).forEach(fk => { if (fk.includes('|')) slotKeys.add(fk); });
+
+  slotKeys.forEach(key => {
     const [date, time] = key.split('|');
+    if (!date || date < todayStr) return;
+    const force = forceFor_(master, date, time);
     const cap = capacityFor_(master, date, time);
-    if (cap === null) return; // 定員マスターに無い枠はスキップ
-    const remaining = Math.max(cap - booked[key], 0);
-    const desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : 'immediate';
-    results.push({ date, time, cap, booked: booked[key], remaining, desiredMode });
+    const bookedN = booked[key] || 0;
+
+    let desiredMode, remaining;
+    if (force === 'closed') {
+      // 受付停止：切替アダプタ未対応のため通知せずログのみ
+      results.push({ date, time, cap, booked: bookedN, remaining: 0, desiredMode: 'closed(手動)' });
+      return;
+    } else if (force === 'request') {
+      desiredMode = 'request';
+      remaining = cap === null ? 0 : Math.max(cap - bookedN, 0);
+    } else {
+      if (cap === null) return; // 定員未設定かつ強制なしはスキップ
+      remaining = Math.max(cap - bookedN, 0);
+      desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : 'immediate';
+    }
+    results.push({ date, time, cap, booked: bookedN, remaining, desiredMode });
 
     // 前回と同じモードなら何もしない（無駄打ち防止）
     if (state[key] === desiredMode) return;
