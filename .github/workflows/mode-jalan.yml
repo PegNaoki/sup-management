@@ -1,0 +1,85 @@
+name: Switch Jalan Slot Mode
+
+# GAS から repository_dispatch(mode_jalan) で呼び出される。
+# 残数が限界（残1）に達したら「リクエスト」へ、キャンセルで空きが戻ったら
+# 「即予約」へ、じゃらんの該当枠を切り替える。
+on:
+  repository_dispatch:
+    types: [mode_jalan]
+  workflow_dispatch:
+    inputs:
+      slot_date: { description: "対象日 (YYYY-MM-DD)", required: true }
+      slot_time: { description: "対象時間 (HH:MM)",    required: true }
+      mode:      { description: "request=リクエスト化 / immediate=即予約化", required: true }
+      stock:     { description: "即予約化のとき設定する在庫数",  required: false, default: "0" }
+      dry_run:   { description: "true=保存しない",     required: false, default: "true" }
+      slots:     { description: "一括JSON配列（指定時は上記より優先）", required: false, default: "" }
+
+concurrency:
+  group: ota-sync-jalan       # 在庫減算(reduce-aj)と同時にAJへログインしない
+  cancel-in-progress: false
+
+jobs:
+  switch-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: automation
+        run: npm install
+
+      - name: Install Chromium
+        working-directory: automation
+        run: npx playwright install --with-deps chromium
+
+      - name: Switch slot mode (jalan)
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          SHOP_NAME:      ${{ secrets.SHOP_NAME }}
+          SLOTS:      ${{ toJSON(github.event.client_payload.slots) != 'null' && toJSON(github.event.client_payload.slots) || github.event.inputs.slots }}
+          SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
+          SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
+          MODE:       ${{ github.event.client_payload.mode || github.event.inputs.mode }}
+          STOCK:      ${{ github.event.client_payload.stock || github.event.inputs.stock || '0' }}
+          DRY_RUN:    ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
+          HEADLESS:   "true"
+        run: node mode-jalan-slot.js
+
+      - name: Upload run log & screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: jalan-mode-artifacts-${{ github.run_id }}
+          path: |
+            automation/run-log-jalan-mode.jsonl
+            automation/result-jalan-mode.png
+            automation/error-jalan-mode.png
+          if-no-files-found: ignore
+
+      - name: Notify failure to LINE
+        if: failure()
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_USER:  ${{ secrets.LINE_USER_ID }}
+          SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
+          SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
+          MODE:       ${{ github.event.client_payload.mode || github.event.inputs.mode }}
+          SOURCE_SITE: ${{ github.event.client_payload.source_site }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
+            echo "LINE未設定のため通知スキップ"; exit 0
+          fi
+          TEXT="🚨【至急】じゃらんの枠モード切替に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} → ${MODE}（発生元: ${SOURCE_SITE}）\n影響: 即予約/リクエストの状態が想定と異なる可能性\n👉 じゃらん管理画面で枠状態を手動確認してください\nログ: ${RUN_URL}"
+          PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
+          curl -sS -X POST https://api.line.me/v2/bot/message/push \
+            -H "Authorization: Bearer $LINE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
