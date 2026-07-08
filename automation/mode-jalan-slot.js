@@ -174,14 +174,20 @@ async function switchOneSlot(mng, task) {
     const sel0 = mng.locator('select[name="reservationType"]').first();
     await sel0.waitFor({ state: 'visible', timeout: 10000 });
     await sel0.selectOption(MODE_TO_RT[mode]);
-    await mng.waitForTimeout(800);
+    await mng.waitForTimeout(500);
+    // 受付制限を「変更する(1)」にして数値入力欄を出現させる
+    const limitSel0 = mng.locator('select').filter({ has: mng.getByRole('option', { name: '変更する', exact: true }) }).first();
+    if (await limitSel0.count() > 0) { await limitSel0.selectOption('1').catch(() => {}); await mng.waitForTimeout(500); }
     const combos = await mng.locator('select').evaluateAll(els => els.map((el, i) => ({
       i, name: el.name || '', value: el.value,
       options: [...el.options].map(o => ({ v: o.value, t: (o.textContent||'').trim() })),
     }))).catch(() => []);
-    const panelHtml = await mng.locator('.panel, [class*="panel"]').first().evaluate(el => el.outerHTML).catch(() => '');
+    const inputs = await mng.locator('input').evaluateAll(els => els.map((el, i) => ({
+      i, name: el.name || '', type: el.type, placeholder: el.placeholder || '',
+      value: el.value, visible: !!(el.offsetParent), cls: el.className,
+    }))).catch(() => []);
     log('dump_panel_selects', { count: combos.length, selects: combos });
-    log('dump_panel_html', { html: panelHtml.slice(0, 3000) });
+    log('dump_panel_inputs', { count: inputs.length, inputs: inputs.filter(x => x.visible) });
     await backToCalendar(mng);
     return { result: 'dumped' };
   }
