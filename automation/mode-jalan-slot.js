@@ -162,64 +162,66 @@ async function switchOneSlot(mng, task) {
   const { date, time, mode } = task;
   const targetRt = MODE_TO_RT[mode];
 
-  // 1. 対象セルを開いて現在の reservationType を読む
-  let sel = await openSlotPanel(mng, date, time);
-  const beforeRt = await sel.inputValue().catch(() => null);
-  log('slot_before', { date, time, mode, beforeRt, meaning: rtMeaning(beforeRt) });
+  // 1. 対象セルから現在の予約タイプ（アイコン）を読む
+  let cell = await getCell(mng, date, time);
+  const beforeMode = await readCellMode(cell);
+  log('slot_before', { date, time, mode, beforeMode, meaning: rtMeaning(MODE_TO_RT[beforeMode] || '') });
 
-  if (beforeRt === targetRt) {
+  if (beforeMode === mode) {
     log('slot_already', { date, time, note: `既に${rtMeaning(targetRt)}` });
-    await backToCalendar(mng);
     return { result: 'already' };
   }
   if (CONFIG.dryRun) {
-    log('slot_dry_run', { date, time, note: `${rtMeaning(beforeRt)} → ${rtMeaning(targetRt)}（変更せず）` });
-    await backToCalendar(mng);
+    log('slot_dry_run', { date, time, note: `${rtMeaning(MODE_TO_RT[beforeMode] || '')} → ${rtMeaning(targetRt)}（変更せず）` });
     return { result: 'dry_run' };
   }
 
-  // 2. reservationType を変更 → 一括変更する
+  // 2. セルのリンクを開いて reservationType を変更 → 一括変更する
+  const link = cell.locator('a.action-link, a').first();
+  await link.click();
+  const sel = mng.locator('select[name="reservationType"]').first();
+  await sel.waitFor({ state: 'visible', timeout: 10000 });
   await sel.selectOption(targetRt);
   await mng.getByRole('button', { name: '一括変更する' }).click();
   await mng.waitForLoadState('networkidle').catch(() => {});
   await mng.waitForTimeout(1500);
 
-  // 3. 再オープンして検証
-  sel = await openSlotPanel(mng, date, time);
-  const afterRt = await sel.inputValue().catch(() => null);
+  // 3. カレンダーをリロードして、セルのアイコンで検証
   await backToCalendar(mng);
-  if (afterRt !== targetRt) {
-    throw new SlotSyncError(`切替検証NG：想定(${rtMeaning(targetRt)})だが実際は(${rtMeaning(afterRt)})`);
+  cell = await getCell(mng, date, time);
+  const afterMode = await readCellMode(cell);
+  if (afterMode !== mode) {
+    throw new SlotSyncError(`切替検証NG：想定(${mode})だが実際は(${afterMode})`);
   }
-  log('slot_switched', { date, time, from: rtMeaning(beforeRt), to: rtMeaning(afterRt) });
-  return { result: 'switched', from: beforeRt, to: afterRt };
+  log('slot_switched', { date, time, from: beforeMode, to: afterMode });
+  return { result: 'switched', from: beforeMode, to: afterMode };
 }
 
-// 対象日時のセルの「(N人)」リンクを開き、reservationType の select を返す。
-async function openSlotPanel(mng, date, time) {
+// 対象日時のセル(li)を返す
+async function getCell(mng, date, time) {
   const col = await locateDateColumn(mng, date);
   if (col.index < 0) throw new SlotSyncError(`対象日 ${date} をカレンダーで特定できません`);
   const cell = await locateSlotCell(mng, time, col.index);
   if (!cell) throw new SlotSyncError(`時間 ${time} の枠を特定できません`);
-
-  // デバッグ：セルのHTMLを出して、現在の予約タイプがどう表現されているか調べる
   if (process.env.DEBUG_DOM === 'true') {
     const cellHtml = await cell.evaluate(el => el.outerHTML).catch(() => '');
     log('debug_cell_html', { date, time, html: cellHtml.slice(0, 1200) });
   }
+  return cell;
+}
 
-  // セル内の枠リンク（"(6人)" 等）をクリックして編集パネルを開く
-  const link = cell.locator('a').first();
-  if (await link.count() === 0) throw new SlotSyncError(`枠リンクが見つかりません（${date} ${time}）`);
-  await link.click();
-  const sel = mng.locator('select[name="reservationType"]').first();
-  await sel.waitFor({ state: 'visible', timeout: 10000 });
-
-  if (process.env.DEBUG_DOM === 'true') {
-    const opts = await sel.evaluate(el => [...el.options].map(o => ({ v: o.value, t: (o.textContent||'').trim(), sel: o.selected }))).catch(() => []);
-    log('debug_select_options', { options: opts });
-  }
-  return sel;
+// セルの sales-status アイコンから現在モードを判定：
+//   icon-confirmed=即時予約(immediate) / icon-unconfirmed=リクエスト(request) / icon-combination=併用
+async function readCellMode(cell) {
+  const cls = await cell.locator('.sales-status-wrapper [class^="icon-"]').first()
+    .getAttribute('class').catch(() => null);
+  if (!cls) return null;
+  const s = cls.toLowerCase();
+  if (s.includes('combination'))  return 'combination';
+  if (s.includes('unconfirmed'))  return 'request';   // ※ 'confirmed' 判定より前に
+  if (s.includes('confirmed'))    return 'immediate';
+  if (s.includes('nosale') || s.includes('none')) return 'closed';
+  return null;
 }
 
 // 編集パネルからカレンダーに戻る（リロードで確実に一覧へ）
