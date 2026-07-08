@@ -977,8 +977,14 @@ function syncSlotModes() {
     return `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} ${r.weekend ? '金土日祝' : '平日'} → ${ps}`;
   }).join('\n'));
 
+  // 有効サイトのみ dispatch する（既定は 'aj' のみ。ヘッドレス検証が済んだサイトを
+  // スクリプトプロパティ MODE_SYNC_SITES にカンマ区切りで追加する。例: "aj,jalan"）
+  const enabledRaw = PropertiesService.getScriptProperties().getProperty('MODE_SYNC_SITES') || 'aj';
+  const enabledSites = enabledRaw.split(',').map(s => s.trim()).filter(Boolean);
+
   // サイトごとに、変更分を1回のdispatchでまとめて送る
   Object.keys(MODE_SITES).forEach(site => {
+    if (enabledSites.indexOf(site) === -1) return; // 無効サイトは送らない
     const list = changesBySite[site];
     if (list.length === 0) return;
     const ok = notifyModeBatch_(site, list.map(c => ({ date: c.date, time: c.time, mode: c.mode, stock: c.stock })));
