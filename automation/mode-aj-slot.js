@@ -181,6 +181,11 @@ async function switchOneSlot(page, task) {
     log('slot_already', { date, time, note: `既に${statusMeaning(targetStatus)}` });
     return { result: 'already' };
   }
+  // 「開催なし(4)」は運営が意図的に閉じた枠。自動で開けない（即予約化しない）。
+  if (beforeStatus === 4) {
+    log('slot_skip', { date, time, note: '開催なしのため自動変更しない（閉じたまま）' });
+    return { result: 'skipped' };
+  }
   if (CONFIG.dryRun) {
     log('slot_dry_run', { date, time, note: `${statusMeaning(beforeStatus)} → ${statusMeaning(targetStatus)}（変更せず）` });
     return { result: 'dry_run' };
