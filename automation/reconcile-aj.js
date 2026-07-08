@@ -41,8 +41,16 @@ async function main() {
   const browser = await chromium.launch({
     headless: CONFIG.headless,
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
+    args: ['--disable-blink-features=AutomationControlled'],
   });
-  const page = await browser.newPage();
+  // ヘッドレス検知（HeadlessChrome UA / navigator.webdriver）を回避して通常Chromeに見せる
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    locale: 'ja-JP',
+    viewport: { width: 1440, height: 900 },
+  });
+  await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
+  const page = await context.newPage();
 
   try {
     // ---------- 1. ログイン ----------
@@ -51,12 +59,22 @@ async function main() {
     await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
     await page.getByRole('button', { name: 'ログインする' }).click();
     await page.waitForLoadState('networkidle');
-    log('login_ok');
+    // ログイン成功をURLで確認（/login のままなら失敗）
+    await page.waitForTimeout(1500);
+    if (/\/login/.test(page.url())) {
+      const msg = await page.evaluate(() => {
+        const el = document.querySelector('.alert, .error, .help-block, .invalid-feedback');
+        return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+      }).catch(() => '');
+      await page.screenshot({ path: 'reconcile-aj-error.png', fullPage: true }).catch(() => {});
+      throw new Error(`ログインに失敗しました（ID/パスワードを確認してください）${msg ? ' 画面メッセージ: ' + msg : ''}`);
+    }
+    log('login_ok', { url: page.url() });
 
-    // ---------- 2. 予約一覧へ（メニュー展開→リンク or 直接URL・堅牢版） ----------
+    // ---------- 2. 予約一覧へ ----------
     await openReservationList(page);
-    // 予約一覧ページ到達を検索フォームの出現で確認
-    await page.waitForSelector('#performSt02, button:has-text("条件で検索する")', { timeout: 30000 });
+    // 検索フォームは折りたたまれている場合があるため「存在（attached）」で待つ
+    await page.waitForSelector('#performSt02', { state: 'attached', timeout: 30000 });
     log('list_page_opened', { url: page.url() });
 
     // ---------- 3. 実施日 from=今日 / to=今日+RANGE_DAYS で検索 ----------
@@ -64,7 +82,8 @@ async function main() {
     const to = new Date(); to.setDate(today.getDate() + CONFIG.rangeDays);
     await fillDate(page, '#performSt02', today);
     await fillDate(page, '#performEnd02', to);
-    await page.getByRole('button', { name: '条件で検索する' }).click();
+    // 検索ボタンが隠れている可能性があるので force クリック
+    await page.getByRole('button', { name: '条件で検索する' }).click({ force: true });
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(1500);
     log('search_done');
@@ -135,36 +154,47 @@ async function main() {
   }
 }
 
-// 「予約一覧」へ遷移する。メニュー展開に頼らず、リンクのhrefを直接たどる（ヘッドレス対応）。
+// 「予約一覧」へ遷移する。サイドバーの描画を待ち、予約管理メニューを展開してから
+// 予約一覧リンクをクリックする。
 async function openReservationList(page) {
   await page.waitForLoadState('networkidle').catch(() => {});
 
-  // サイドバーの描画を待ちつつ、予約一覧リンクのhrefを取得（最大20秒ポーリング）
-  let href = null;
-  for (let i = 0; i < 20; i++) {
-    href = await page.evaluate(() => {
-      const a = [...document.querySelectorAll('a')].find(x => (x.textContent || '').replace(/\s+/g, '').includes('予約一覧'));
-      return a ? a.getAttribute('href') : null;
-    });
-    if (href) break;
+  // サイドバーが出るまで待つ（最大25秒ポーリング）＋診断ログ
+  let found = false;
+  for (let i = 0; i < 25; i++) {
+    const diag = await page.evaluate(() => ({
+      url: location.href,
+      hasReserveMenu: !!document.querySelector('#sidemenuReserve'),
+      hasListLink: !!document.querySelector('a[href="/reserve/list"]'),
+      anchorCount: document.querySelectorAll('a').length,
+    }));
+    if (i === 0 || diag.hasListLink) log('nav_diag', diag);
+    if (diag.hasListLink) { found = true; break; }
+    // 予約管理メニューを展開してみる
+    const menu = page.locator('#sidemenuReserve');
+    if (await menu.count() > 0) await menu.click().catch(() => {});
     await page.waitForTimeout(1000);
   }
+  if (!found) throw new Error('予約一覧リンク(a[href="/reserve/list"])が見つかりませんでした');
 
-  if (href && href !== '#') {
-    await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
-    return;
+  // 予約管理メニューを展開してリンクを表示させる
+  const menu = page.locator('#sidemenuReserve');
+  const link = page.locator('a[href="/reserve/list"]').first();
+  for (let i = 0; i < 5; i++) {
+    if (await link.isVisible().catch(() => false)) break;
+    if (await menu.count() > 0) await menu.click().catch(() => {});
+    await page.waitForTimeout(700);
   }
-
-  // hrefが取れない場合はメニュークリックで展開してから遷移を試みる
-  const parent = page.locator('a, li, span', { hasText: '予約管理' }).first();
-  if (await parent.count() > 0) { await parent.click().catch(() => {}); await page.waitForTimeout(1500); }
-  const link = page.getByRole('link', { name: '予約一覧' }).first();
-  if (await link.count() > 0) {
-    await link.click({ force: true }).catch(() => {});
-    await page.waitForLoadState('networkidle').catch(() => {});
-    return;
+  // 表示されていれば通常クリック、ダメでもJSで直接ナビ
+  if (await link.isVisible().catch(() => false)) {
+    await link.click();
+  } else {
+    await page.evaluate(() => {
+      const a = document.querySelector('a[href="/reserve/list"]');
+      if (a) a.click();
+    });
   }
-  throw new Error('予約一覧メニューを開けませんでした');
+  await page.waitForLoadState('networkidle').catch(() => {});
 }
 
 // 日付入力欄に値をセット。readonly の datepicker のため JS で直接値を書き込む。

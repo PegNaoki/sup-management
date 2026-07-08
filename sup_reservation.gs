@@ -672,6 +672,191 @@ function normalizeSlotDate_(dateVal) {
   return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
 }
 
+// ============================================================
+// 定員マスターに基づく枠モード同期（バッチ／1日数回実行）
+// ------------------------------------------------------------
+// 方針：
+//   ① 定員（枠数のマスター）は「定員マスター」シートで手動管理（たまに変更）
+//   ② 1日数回、予約一覧の予約状況を集計し、残り枠を算出
+//        残り枠 = 定員 − 予約人数合計（キャンセル/却下除く・全OTA分）
+//   ③ 残り枠が1以下 → 全サイトを「リクエスト」化
+//      残り枠が2以上 → 全サイトを「即予約」化（在庫=残り枠）
+//   状態が前回から変わったときだけ dispatch する（無駄打ち防止）。
+//
+// 「定員マスター」シート（無ければ initCapacityMasterSheet_ で作成）：
+//   A:日付(空=全日共通)  B:時間帯(HH:MM)  C:定員
+//   ・日付を空にした行 → その時間帯の既定の定員（全日共通）
+//   ・日付を入れた行   → その日だけ定員を上書き
+//
+// 必要スクリプトプロパティ：
+//   GITHUB_TOKEN / GITHUB_REPO / MODE_SYNC_ENABLED("true"で有効) / MODE_SYNC_DRY_RUN
+// ============================================================
+
+// 枠モードを自動操作できるサイトと dispatch イベント種別（アダプタ実装済みのみ）
+const MODE_SITES = {
+  aj: { event: 'mode_aj' },
+  // jalan / urakata は切替アダプタ実装後に追加
+};
+
+const CAPACITY_SHEET_NAME = '定員マスター';
+const REQUEST_THRESHOLD   = 1; // 残りがこの数以下でリクエスト化（残1）
+const SLOT_MODE_STATE_PROP = 'SLOT_MODE_STATE';
+
+// 定員マスターシートを用意（無ければヘッダ付きで作成）
+function initCapacityMasterSheet_(ss) {
+  let sheet = ss.getSheetByName(CAPACITY_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CAPACITY_SHEET_NAME);
+    sheet.getRange(1, 1, 1, 3).setValues([['日付(空=全日共通)', '時間帯(HH:MM)', '定員']]);
+    sheet.getRange(2, 1, 2, 3).setValues([
+      ['', '10:00', 8],
+      ['', '13:30', 8],
+    ]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+// 定員マスターを読み込む。{ defaults:{ 'HH:MM':cap }, overrides:{ 'YYYY-MM-DD|HH:MM':cap } }
+function loadCapacityMaster_(ss) {
+  const sheet = initCapacityMasterSheet_(ss);
+  const data  = sheet.getDataRange().getValues();
+  const defaults = {}, overrides = {};
+  for (let i = 1; i < data.length; i++) {
+    const dateRaw = data[i][0];
+    const time    = normalizeSlotTime_(data[i][1]);
+    const cap     = parseInt(data[i][2], 10);
+    if (!time || isNaN(cap)) continue;
+    const date = dateRaw ? normalizeSlotDate_(dateRaw) : '';
+    if (date) overrides[`${date}|${time}`] = cap;
+    else      defaults[time] = cap;
+  }
+  return { defaults, overrides };
+}
+
+function capacityFor_(master, date, time) {
+  const o = master.overrides[`${date}|${time}`];
+  if (o !== undefined) return o;
+  const d = master.defaults[time];
+  return d !== undefined ? d : null;
+}
+
+// 時刻を HH:MM に正規化
+function normalizeSlotTime_(timeVal) {
+  if (timeVal === '' || timeVal === null || timeVal === undefined) return '';
+  if (timeVal instanceof Date) {
+    return `${String(timeVal.getHours()).padStart(2,'0')}:${String(timeVal.getMinutes()).padStart(2,'0')}`;
+  }
+  const m = String(timeVal).match(/(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
+}
+
+// メイン：定員マスターと予約状況から各枠のモードを同期する
+function syncSlotModes() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const master = loadCapacityMaster_(ss);
+  const data  = sheet.getDataRange().getValues();
+  const todayStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+  // 予約一覧から (date|time) ごとに予約人数を集計（キャンセル/却下除く・今日以降）
+  const booked = {}; // { 'YYYY-MM-DD|HH:MM': 合計人数 }
+  for (let i = 1; i < data.length; i++) {
+    const row    = data[i];
+    const status = row[COLUMNS.STATUS - 1];
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const date = normalizeSlotDate_(row[COLUMNS.DATE - 1]);
+    const time = normalizeSlotTime_(row[COLUMNS.TIME - 1]);
+    if (!date || !time || date < todayStr) continue;
+    const p = parseInt(row[COLUMNS.PEOPLE - 1], 10);
+    if (isNaN(p)) continue;
+    const key = `${date}|${time}`;
+    booked[key] = (booked[key] || 0) + p;
+  }
+
+  const state = loadSlotModeState_();
+  const results = [];
+  Object.keys(booked).forEach(key => {
+    const [date, time] = key.split('|');
+    const cap = capacityFor_(master, date, time);
+    if (cap === null) return; // 定員マスターに無い枠はスキップ
+    const remaining = Math.max(cap - booked[key], 0);
+    const desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : 'immediate';
+    results.push({ date, time, cap, booked: booked[key], remaining, desiredMode });
+
+    // 前回と同じモードなら何もしない（無駄打ち防止）
+    if (state[key] === desiredMode) return;
+    notifyModeSwitch_({ slotDate: date, slotTime: time, mode: desiredMode, stock: remaining });
+    state[key] = desiredMode;
+  });
+  saveSlotModeState_(state);
+
+  Logger.log('【枠モード同期】\n' + results.map(r =>
+    `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} → ${r.desiredMode}`).join('\n'));
+  return results;
+}
+
+// 手動実行用：dispatchせず算出結果だけ確認
+function syncSlotModesDryReport() {
+  const before = PropertiesService.getScriptProperties().getProperty('MODE_SYNC_DRY_RUN');
+  PropertiesService.getScriptProperties().setProperty('MODE_SYNC_DRY_RUN', 'true');
+  const r = syncSlotModes();
+  if (before === null) PropertiesService.getScriptProperties().deleteProperty('MODE_SYNC_DRY_RUN');
+  else PropertiesService.getScriptProperties().setProperty('MODE_SYNC_DRY_RUN', before);
+  return r;
+}
+
+// 枠モード切替を GitHub Actions に通知（repository_dispatch）
+function notifyModeSwitch_(opt) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('MODE_SYNC_ENABLED') !== 'true') {
+    Logger.log(`枠モード同期スキップ(無効): ${opt.slotDate} ${opt.slotTime} → ${opt.mode}`);
+    return;
+  }
+  const token = props.getProperty('GITHUB_TOKEN');
+  const repo  = props.getProperty('GITHUB_REPO');
+  if (!token || !repo) { Logger.log('枠モード同期スキップ：GITHUB_TOKEN/GITHUB_REPO 未設定'); return; }
+
+  const dryRun = props.getProperty('MODE_SYNC_DRY_RUN') || 'true';
+  Object.keys(MODE_SITES).forEach(site => {
+    try {
+      const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+        payload: JSON.stringify({
+          event_type: MODE_SITES[site].event,
+          client_payload: {
+            slot_date:   opt.slotDate,
+            slot_time:   opt.slotTime,
+            mode:        opt.mode,
+            stock:       String(opt.stock),
+            dry_run:     dryRun,
+            source_site: 'capacity-sync',
+            target_site: site,
+          },
+        }),
+        muteHttpExceptions: true,
+      });
+      const code = res.getResponseCode();
+      if (code === 204) Logger.log(`枠モード同期：${site} 通知 (${opt.slotDate} ${opt.slotTime} → ${opt.mode} 在庫${opt.stock})`);
+      else Logger.log(`枠モード同期エラー ${site} (${code}): ${res.getContentText()}`);
+    } catch (e) {
+      Logger.log(`枠モード同期エラー ${site}: ${e.message}`);
+    }
+  });
+}
+
+// 枠モードの前回状態（{ 'date|time': 'request'|'immediate' }）
+function loadSlotModeState_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(SLOT_MODE_STATE_PROP);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (e) { return {}; }
+}
+function saveSlotModeState_(state) {
+  PropertiesService.getScriptProperties().setProperty(SLOT_MODE_STATE_PROP, JSON.stringify(state));
+}
+
 function parseEmail(message) {
   const from    = message.getFrom();
   const body    = message.getPlainBody();
@@ -875,6 +1060,14 @@ function parseDateTime(dateStr, timeStr) {
 //   2. デプロイ →「ウェブアプリ」として公開（実行ユーザー:自分 / アクセス:全員）
 //   3. 発行されたURLと同じトークンを GitHub Secrets に設定
 // ============================================================
+// ブラウザでこのWebアプリのURLを開いたときに表示される（デプロイ確認用）。
+// 最新コードがデプロイされていれば下のバージョン文字列が見える。
+function doGet(e) {
+  return ContentService
+    .createTextOutput('SUP reconcile endpoint OK / version: date-name-key-v3')
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
 function doPost(e) {
   const out = (obj) => ContentService
     .createTextOutput(JSON.stringify(obj))
@@ -915,18 +1108,14 @@ function reconcileUrakataReservations_(payload) {
   const data  = sheet.getDataRange().getValues();
   const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
 
-  // カナ氏名を照合しやすい形に正規化（空白除去）
+  // 氏名を照合しやすい形に正規化（空白除去）
   const normName = (s) => String(s || '').replace(/[\s　]/g, '');
-  // 時刻正規化：Date型でも文字列でも "HH:MM" に統一
-  const normTime = (t) => {
-    if (t instanceof Date) return Utilities.formatDate(t, 'Asia/Tokyo', 'HH:mm');
-    const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
-    return m ? `${m[1].padStart(2,'0')}:${m[2]}` : '';
-  };
-  const key = (date, time, kana) => `${date}|${normTime(time)}|${normName(kana)}`;
+  // ウラカタは予約番号を持たないため「参加日｜氏名」で突合する。
+  // 時刻はシート側で空/別形式のことがあり不一致の原因になるためキーに使わない。
+  const key = (date, kana) => `${date}|${normName(kana)}`;
 
   const urk = (payload.reservations || []);
-  const urkKeys = new Set(urk.map(r => key(r.date, r.time, r.name)));
+  const urkKeys = new Set(urk.map(r => key(r.date, r.name)));
 
   // シート側のウラカタ系（アソビュー/ウラカタ/Web予約）有効予約をマップ化
   const sheetKeys = new Map(); // key -> rowNum
@@ -937,9 +1126,8 @@ function reconcileUrakataReservations_(payload) {
     if (['キャンセル', '却下'].includes(status)) continue;
     const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
     if (!dateStr || dateStr < today) continue;
-    const timeStr = String(data[i][COLUMNS.TIME - 1] || '').slice(0, 5);
     const kana    = data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1];
-    sheetKeys.set(key(dateStr, timeStr, kana), i + 1);
+    sheetKeys.set(key(dateStr, kana), i + 1);
   }
 
   const missing = []; // ウラカタにあってシートに無い
@@ -947,7 +1135,7 @@ function reconcileUrakataReservations_(payload) {
 
   // ウラカタ → シート
   for (const r of urk) {
-    const k = key(r.date, r.time, r.name);
+    const k = key(r.date, r.name);
     if (!sheetKeys.has(k)) {
       const rec = {
         site: r.media && r.media.includes('アソビュー') ? 'アソビュー/satsuki' : 'Web予約',
@@ -1199,6 +1387,44 @@ function cancelSheetRow_(sheet, rowNum, reason) {
       Logger.log(`カレンダー削除エラー(行${rowNum}): ${e.message}`);
     }
   }
+}
+
+// 重複行の掃除（定期突合の誤作動で増えた重複を1件だけ残して削除）。
+// 判定キー：予約サイト系グループ｜参加日｜時間｜氏名(カナ優先)。
+// キャンセル/却下行は対象外（残す）。手動実行専用。
+function cleanupDuplicateRows() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+
+  const normName = (s) => String(s || '').replace(/[\s　]/g, '');
+
+  const seen = {};          // key -> 最初に見つけた行番号
+  const toDelete = [];      // 削除する行番号（重複の2件目以降）
+
+  for (let i = 1; i < data.length; i++) {
+    const status = String(data[i][COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
+    const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
+    if (!dateStr) continue;
+    const kana    = normName(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1]);
+    const bookingNo = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
+    // 予約番号があればそれを優先キー、無ければ サイトグループ|日付|氏名
+    // （時刻はシート側で空/別形式のことがあり重複判定を邪魔するため使わない）
+    const key = bookingNo
+      ? `NO:${bookingNo}`
+      : `${siteGroup_(site) || site}|${dateStr}|${kana}`;
+
+    if (seen[key]) toDelete.push(i + 1);
+    else seen[key] = i + 1;
+  }
+
+  // 下の行から削除（行番号ズレ防止）
+  toDelete.sort((a, b) => b - a).forEach(rowNum => sheet.deleteRow(rowNum));
+
+  Logger.log(`重複削除：${toDelete.length}行を削除しました（削除行: ${toDelete.sort((a,b)=>a-b).join(', ')}）`);
+  return toDelete.length;
 }
 
 function loadExistingReservations(sheet) {
