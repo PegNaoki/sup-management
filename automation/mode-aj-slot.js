@@ -1,16 +1,19 @@
 // ============================================================
-// アクティビティジャパン (ptn.activityjapan.com) 枠モード切替スクリプト
+// アクティビティジャパン (ptn.activityjapan.com) 枠モード切替スクリプト（バッチ対応）
 // ------------------------------------------------------------
 // 枠を「即予約 ⇄ リクエスト」に切り替える。
 //   status: 1=即予約(在庫あり) / 3=リクエスト / 4=開催なし
 //   リクエスト化：日セルを選択 → 「リクエスト にする」ボタン（即反映）
 //   即予約化　　：日セルを選択 → 在庫数を入力 → 「設定」ボタン
 //
+// 複数枠を1回のログインでまとめて処理できる（GASからの一括同期用）。
+//
 // 環境変数：
 //   AJ_ID / AJ_PASSWORD
-//   SLOT_DATE (YYYY-MM-DD) / SLOT_TIME (HH:MM)
-//   MODE: 'request'（リクエスト化） | 'immediate'（即予約化）
-//   STOCK: MODE=immediate のとき設定する在庫数（必須）
+//   ▼ 一括指定（優先）:
+//     SLOTS: JSON配列 '[{"date":"2026-08-14","time":"13:30","mode":"request","stock":0}, ...]'
+//   ▼ 単一指定（手動テスト用）:
+//     SLOT_DATE (YYYY-MM-DD) / SLOT_TIME (HH:MM) / MODE(request|immediate) / STOCK
 //   DRY_RUN (既定 true) / HEADLESS (既定 true)
 // ============================================================
 
@@ -21,14 +24,9 @@ const CONFIG = {
   loginUrl: 'https://ptn.activityjapan.com/login',
   id:       process.env.AJ_ID,
   password: process.env.AJ_PASSWORD,
-  date:     normalizeYmd(process.env.SLOT_DATE),
-  time:     normalizeHm(process.env.SLOT_TIME),
-  mode:     (process.env.MODE || '').toLowerCase(),   // request | immediate
-  stock:    parseInt(process.env.STOCK || '0', 10),
   dryRun:   process.env.DRY_RUN !== 'false',
   headless: process.env.HEADLESS !== 'false',
   logPath:  process.env.LOG_PATH || 'run-log-aj-mode.jsonl',
-  maxMonthNav: 14,
 };
 
 const RUN_LOG = [];
@@ -39,8 +37,7 @@ function log(event, data = {}) {
 }
 function flushLog(extra = {}) {
   try {
-    RUN_LOG.push({ ts: new Date().toISOString(), event: 'summary',
-      date: CONFIG.date, time: CONFIG.time, mode: CONFIG.mode, dryRun: CONFIG.dryRun, ...extra });
+    RUN_LOG.push({ ts: new Date().toISOString(), event: 'summary', dryRun: CONFIG.dryRun, ...extra });
     fs.writeFileSync(CONFIG.logPath, RUN_LOG.map(r => JSON.stringify(r)).join('\n') + '\n');
   } catch (e) { console.error('ログ書き出し失敗:', e.message); }
 }
@@ -58,21 +55,43 @@ function normalizeYmd(d) {
   return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
 }
 function ymdCompact(d) { return d.replace(/-/g, ''); }
+function statusMeaning(s) { return { 1: '即予約', 3: 'リクエスト', 4: '開催なし' }[s] || `不明(${s})`; }
+
+// 処理対象の枠リストを組み立てる（SLOTS優先、無ければ単一env）
+function buildTasks() {
+  let raw = [];
+  if (process.env.SLOTS) {
+    try { raw = JSON.parse(process.env.SLOTS); }
+    catch (e) { throw new Error(`SLOTS のJSON解析に失敗: ${e.message}`); }
+    if (!Array.isArray(raw)) throw new Error('SLOTS はJSON配列である必要があります');
+  } else if (process.env.SLOT_DATE) {
+    raw = [{ date: process.env.SLOT_DATE, time: process.env.SLOT_TIME, mode: process.env.MODE, stock: process.env.STOCK }];
+  } else {
+    throw new Error('SLOTS または SLOT_DATE が未設定です');
+  }
+  return raw.map((s, i) => {
+    const date = normalizeYmd(s.date);
+    const time = normalizeHm(s.time);
+    const mode = String(s.mode || '').toLowerCase();
+    const stock = parseInt(s.stock || 0, 10);
+    if (!date || !time) throw new Error(`slots[${i}]: date/time が不正 (${JSON.stringify(s)})`);
+    if (!['request', 'immediate'].includes(mode)) throw new Error(`slots[${i}]: mode は request|immediate`);
+    if (mode === 'immediate' && !stock) throw new Error(`slots[${i}]: 即予約化には stock が必要`);
+    return { date, time, mode, stock, compact: ymdCompact(date) };
+  });
+}
 
 function assertConfig() {
   const miss = [];
   if (!CONFIG.id)       miss.push('AJ_ID');
   if (!CONFIG.password) miss.push('AJ_PASSWORD');
-  if (!CONFIG.date)     miss.push('SLOT_DATE');
-  if (!CONFIG.time)     miss.push('SLOT_TIME');
-  if (!['request', 'immediate'].includes(CONFIG.mode)) miss.push('MODE(request|immediate)');
-  if (CONFIG.mode === 'immediate' && !CONFIG.stock) miss.push('STOCK(即予約化には在庫数が必要)');
   if (miss.length) throw new Error(`必須の環境変数が未設定: ${miss.join(', ')}`);
 }
 
 async function main() {
   assertConfig();
-  log('start', { date: CONFIG.date, time: CONFIG.time, mode: CONFIG.mode, stock: CONFIG.stock, dryRun: CONFIG.dryRun });
+  const tasks = buildTasks();
+  log('start', { count: tasks.length, dryRun: CONFIG.dryRun });
 
   const browser = await chromium.launch({
     headless: CONFIG.headless,
@@ -85,10 +104,10 @@ async function main() {
   });
   await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
   const page = await context.newPage();
-  let result = 'unknown';
+  const results = [];
 
   try {
-    // ---------- 1. ログイン ----------
+    // ---------- ログイン（1回だけ） ----------
     await page.goto(CONFIG.loginUrl, { waitUntil: 'networkidle' });
     await page.getByRole('textbox', { name: 'ID' }).fill(CONFIG.id);
     await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
@@ -98,91 +117,97 @@ async function main() {
     if (/\/login/.test(page.url())) throw new SlotSyncError('ログインに失敗しました（ID/パスワードを確認）');
     log('login_ok', { url: page.url() });
 
-    // ---------- 2. カレンダー管理・在庫管理へ ----------
+    // ---------- カレンダー管理・在庫管理へ（1回だけ） ----------
     await openCalendarMenu(page);
     await page.waitForLoadState('networkidle');
     await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
     log('calendar_opened');
 
-    // ---------- 3. 対象月・行(時間)・plan/course ----------
-    const compact = ymdCompact(CONFIG.date);
-    await ensureMonthShown(page, compact);
-    const ids = await page.evaluate((time) => {
-      const rows = [...document.querySelectorAll('tr.plan-stock')];
-      for (const row of rows) {
-        const t = row.querySelector('.plan-time span');
-        if (t && (t.textContent || '').trim() === time) {
-          return { plan: (row.querySelector('.plan_id') || {}).textContent?.trim() || '',
-                   course: (row.querySelector('.plan_course_id') || {}).textContent?.trim() || '' };
-        }
+    // ---------- 各枠を順に処理 ----------
+    for (const task of tasks) {
+      try {
+        const r = await switchOneSlot(page, task);
+        results.push({ ...task, ...r });
+      } catch (e) {
+        log('slot_error', { date: task.date, time: task.time, mode: task.mode, message: e.message });
+        results.push({ ...task, result: 'error', message: e.message });
       }
-      return null;
-    }, CONFIG.time);
-    if (!ids) throw new SlotSyncError(`時間 ${CONFIG.time} の行が見つかりません`);
-    log('row_located', ids);
-
-    const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
-    const beforeStatus = await readStatus(page, statusId);
-    log('status_before', { statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
-
-    const targetStatus = CONFIG.mode === 'request' ? 3 : 1;
-    if (beforeStatus === targetStatus) {
-      result = 'already';
-      log('already', { note: `既に${statusMeaning(targetStatus)}のため変更不要` });
-      await page.screenshot({ path: 'result-aj-mode.png', fullPage: true }).catch(() => {});
-      return;
     }
 
-    if (CONFIG.dryRun) {
-      result = 'dry_run';
-      log('dry_run', { note: `${statusMeaning(beforeStatus)} → ${statusMeaning(targetStatus)} に切替予定（変更せず）` });
-    } else {
-      // ---------- 4. 日セルを選択 ----------
-      // 対象行のセルだけを選ぶため、行スコープで day_ セルのボタンをクリック
-      const rowCellBtn = page.locator(`tr.plan-stock:has(.plan_course_id:text-is("${ids.course}")) .day_${compact} button`).first();
-      await rowCellBtn.click();
-      await page.waitForTimeout(500);
-
-      if (CONFIG.mode === 'request') {
-        await page.getByRole('button', { name: 'リクエスト にする' }).click();
-      } else {
-        const spin = page.getByRole('spinbutton').first();
-        await spin.waitFor({ state: 'visible', timeout: 8000 });
-        await spin.fill(String(CONFIG.stock));
-        await page.getByRole('button', { name: '設定' }).click();
-      }
-      await page.waitForTimeout(2000);
-      await page.waitForLoadState('networkidle').catch(() => {});
-
-      // ---------- 5. リロードして検証 ----------
-      await page.reload({ waitUntil: 'networkidle' });
-      await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
-      await ensureMonthShown(page, compact);
-      const afterStatus = await readStatus(page, statusId);
-      log('status_after', { afterStatus, meaning: statusMeaning(afterStatus) });
-      if (afterStatus !== targetStatus) {
-        result = 'not_persisted';
-        await page.screenshot({ path: 'error-aj-mode.png', fullPage: true }).catch(() => {});
-        throw new SlotSyncError(`切替検証NG：想定(${targetStatus})だがリロード後は(${afterStatus})`);
-      }
-      result = 'switched';
-      log('switched', { from: statusMeaning(beforeStatus), to: statusMeaning(afterStatus) });
-    }
+    const ok = results.filter(r => ['switched', 'already', 'dry_run'].includes(r.result)).length;
+    const ng = results.length - ok;
+    log('done', { total: results.length, ok, ng });
+    if (ng > 0) { process.exitCode = 1; }
     await page.screenshot({ path: 'result-aj-mode.png', fullPage: true }).catch(() => {});
   } catch (err) {
-    result = result === 'unknown' ? 'error' : result;
     log('error', { message: err.message, type: err.constructor.name });
     console.error('❌ エラー:', err.message);
     await page.screenshot({ path: 'error-aj-mode.png', fullPage: true }).catch(() => {});
     process.exitCode = 1;
   } finally {
-    flushLog({ result });
+    flushLog({ results });
     await browser.close();
   }
 }
 
-function statusMeaning(s) {
-  return { 1: '即予約', 3: 'リクエスト', 4: '開催なし' }[s] || `不明(${s})`;
+// 1枠のモードを切り替える。page はログイン済み・カレンダー表示済み。
+async function switchOneSlot(page, task) {
+  const { date, time, mode, stock, compact } = task;
+  await ensureMonthShown(page, compact);
+
+  const ids = await page.evaluate((t) => {
+    const rows = [...document.querySelectorAll('tr.plan-stock')];
+    for (const row of rows) {
+      const el = row.querySelector('.plan-time span');
+      if (el && (el.textContent || '').trim() === t) {
+        return { plan: (row.querySelector('.plan_id') || {}).textContent?.trim() || '',
+                 course: (row.querySelector('.plan_course_id') || {}).textContent?.trim() || '' };
+      }
+    }
+    return null;
+  }, time);
+  if (!ids) throw new SlotSyncError(`時間 ${time} の行が見つかりません`);
+
+  const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
+  const beforeStatus = await readStatus(page, statusId);
+  const targetStatus = mode === 'request' ? 3 : 1;
+  log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
+
+  if (beforeStatus === targetStatus) {
+    log('slot_already', { date, time, note: `既に${statusMeaning(targetStatus)}` });
+    return { result: 'already' };
+  }
+  if (CONFIG.dryRun) {
+    log('slot_dry_run', { date, time, note: `${statusMeaning(beforeStatus)} → ${statusMeaning(targetStatus)}（変更せず）` });
+    return { result: 'dry_run' };
+  }
+
+  // 対象行の日セルを選択
+  const rowCellBtn = page.locator(`tr.plan-stock:has(.plan_course_id:text-is("${ids.course}")) .day_${compact} button`).first();
+  await rowCellBtn.click();
+  await page.waitForTimeout(500);
+
+  if (mode === 'request') {
+    await page.getByRole('button', { name: 'リクエスト にする' }).click();
+  } else {
+    const spin = page.getByRole('spinbutton').first();
+    await spin.waitFor({ state: 'visible', timeout: 8000 });
+    await spin.fill(String(stock));
+    await page.getByRole('button', { name: '設定' }).click();
+  }
+  await page.waitForTimeout(2000);
+  await page.waitForLoadState('networkidle').catch(() => {});
+
+  // リロードして検証
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
+  await ensureMonthShown(page, compact);
+  const afterStatus = await readStatus(page, statusId);
+  if (afterStatus !== targetStatus) {
+    throw new SlotSyncError(`切替検証NG：想定(${targetStatus})だがリロード後は(${afterStatus})`);
+  }
+  log('slot_switched', { date, time, from: statusMeaning(beforeStatus), to: statusMeaning(afterStatus) });
+  return { result: 'switched', from: beforeStatus, to: afterStatus };
 }
 
 // 「カレンダー管理・在庫管理」へ（hrefポーリング＋メニュー展開フォールバック）
@@ -209,12 +234,12 @@ async function openCalendarMenu(page) {
 }
 
 async function ensureMonthShown(page, compact) {
-  if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, nav: 0 }); return; }
+  if (await page.locator(`.day_${compact}`).count() > 0) return;
   const year = Number(compact.slice(0, 4)), month = Number(compact.slice(4, 6));
   const monthBtn = page.getByRole('button', { name: new RegExp(`${year}\\s*年\\s*${month}\\s*月`) }).first();
   if (await monthBtn.count() > 0) {
     await monthBtn.click(); await page.waitForTimeout(1200); await page.waitForLoadState('networkidle').catch(() => {});
-    if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, via: 'monthButton' }); return; }
+    if (await page.locator(`.day_${compact}`).count() > 0) return;
   }
   throw new SlotSyncError(`対象月に移動できません（${compact}）`);
 }

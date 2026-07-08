@@ -886,6 +886,7 @@ function syncSlotModes() {
 
   const state = loadSlotModeState_();
   const results = [];
+  const changes = []; // 前回とモードが変わった枠だけ dispatch する
   // 集計対象は「予約がある枠」＋「マスターで強制指定した枠」の和集合
   const slotKeys = new Set(Object.keys(booked));
   Object.keys(master.forces).forEach(fk => { if (fk.includes('|')) slotKeys.add(fk); });
@@ -914,14 +915,20 @@ function syncSlotModes() {
 
     // 前回と同じモードなら何もしない（無駄打ち防止）
     if (state[key] === desiredMode) return;
-    // 実際にdispatchできたときだけ状態を記録（無効/失敗時は次回も再試行）
-    const dispatched = notifyModeSwitch_({ slotDate: date, slotTime: time, mode: desiredMode, stock: remaining });
-    if (dispatched) state[key] = desiredMode;
+    changes.push({ key, date, time, mode: desiredMode, stock: remaining });
   });
-  saveSlotModeState_(state);
 
   Logger.log('【枠モード同期】\n' + results.map(r =>
     `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} → ${r.desiredMode}`).join('\n'));
+
+  // 変更分を1回のdispatchでまとめて送る（衝突・多重起動を防ぐ）
+  if (changes.length > 0) {
+    const dispatched = notifyModeBatch_(changes.map(c => ({ date: c.date, time: c.time, mode: c.mode, stock: c.stock })));
+    if (dispatched) {
+      changes.forEach(c => { state[c.key] = c.mode; });
+      saveSlotModeState_(state);
+    }
+  }
   return results;
 }
 
@@ -936,11 +943,13 @@ function syncSlotModesDryReport() {
 }
 
 // 枠モード切替を GitHub Actions に通知（repository_dispatch）
+// 複数枠の切替を1回のdispatchでまとめて通知する。
+// changes: [{date,time,mode,stock}, ...]
 // 戻り値：少なくとも1サイトへdispatchできたら true（状態記録の可否判定に使う）
-function notifyModeSwitch_(opt) {
+function notifyModeBatch_(changes) {
   const props = PropertiesService.getScriptProperties();
   if (props.getProperty('MODE_SYNC_ENABLED') !== 'true') {
-    Logger.log(`枠モード同期スキップ(無効): ${opt.slotDate} ${opt.slotTime} → ${opt.mode}`);
+    Logger.log(`枠モード同期スキップ(無効): ${changes.length}件`);
     return false;
   }
   const token = props.getProperty('GITHUB_TOKEN');
@@ -948,6 +957,7 @@ function notifyModeSwitch_(opt) {
   if (!token || !repo) { Logger.log('枠モード同期スキップ：GITHUB_TOKEN/GITHUB_REPO 未設定'); return false; }
 
   const dryRun = props.getProperty('MODE_SYNC_DRY_RUN') || 'true';
+  const slots = changes.map(c => ({ date: c.date, time: c.time, mode: c.mode, stock: String(c.stock) }));
   let anyOk = false;
   Object.keys(MODE_SITES).forEach(site => {
     try {
@@ -958,10 +968,7 @@ function notifyModeSwitch_(opt) {
         payload: JSON.stringify({
           event_type: MODE_SITES[site].event,
           client_payload: {
-            slot_date:   opt.slotDate,
-            slot_time:   opt.slotTime,
-            mode:        opt.mode,
-            stock:       String(opt.stock),
+            slots:       slots,
             dry_run:     dryRun,
             source_site: 'capacity-sync',
             target_site: site,
@@ -970,7 +977,7 @@ function notifyModeSwitch_(opt) {
         muteHttpExceptions: true,
       });
       const code = res.getResponseCode();
-      if (code === 204) { anyOk = true; Logger.log(`枠モード同期：${site} 通知 (${opt.slotDate} ${opt.slotTime} → ${opt.mode} 在庫${opt.stock})`); }
+      if (code === 204) { anyOk = true; Logger.log(`枠モード同期：${site} に一括通知 ${slots.length}件`); }
       else Logger.log(`枠モード同期エラー ${site} (${code}): ${res.getContentText()}`);
     } catch (e) {
       Logger.log(`枠モード同期エラー ${site}: ${e.message}`);
