@@ -202,12 +202,23 @@ async function openSlotPanel(mng, date, time) {
   const cell = await locateSlotCell(mng, time, col.index);
   if (!cell) throw new SlotSyncError(`時間 ${time} の枠を特定できません`);
 
+  // デバッグ：セルのHTMLを出して、現在の予約タイプがどう表現されているか調べる
+  if (process.env.DEBUG_DOM === 'true') {
+    const cellHtml = await cell.evaluate(el => el.outerHTML).catch(() => '');
+    log('debug_cell_html', { date, time, html: cellHtml.slice(0, 1200) });
+  }
+
   // セル内の枠リンク（"(6人)" 等）をクリックして編集パネルを開く
   const link = cell.locator('a').first();
   if (await link.count() === 0) throw new SlotSyncError(`枠リンクが見つかりません（${date} ${time}）`);
   await link.click();
   const sel = mng.locator('select[name="reservationType"]').first();
   await sel.waitFor({ state: 'visible', timeout: 10000 });
+
+  if (process.env.DEBUG_DOM === 'true') {
+    const opts = await sel.evaluate(el => [...el.options].map(o => ({ v: o.value, t: (o.textContent||'').trim(), sel: o.selected }))).catch(() => []);
+    log('debug_select_options', { options: opts });
+  }
   return sel;
 }
 
