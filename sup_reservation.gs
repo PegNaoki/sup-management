@@ -698,10 +698,15 @@ function normalizeSlotDate_(dateVal) {
 //   GITHUB_TOKEN / GITHUB_REPO / MODE_SYNC_ENABLED("true"で有効) / MODE_SYNC_DRY_RUN
 // ============================================================
 
-// 枠モードを自動操作できるサイトと dispatch イベント種別（アダプタ実装済みのみ）
+// 枠モードを自動操作できるサイトと設定。
+//   event       : repository_dispatch のイベント種別
+//   weekendMode : 金土日祝（通常時）の基本モード。平日の通常時は 'request'
+//   stockKind   : dispatch時に渡す stock の意味（'remaining'=残数 / 'capacity'=定員）
+// 残1のときは全サイト 'request'。
 const MODE_SITES = {
-  aj: { event: 'mode_aj' },
-  // jalan / urakata は切替アダプタ実装後に追加
+  aj:    { event: 'mode_aj',    weekendMode: 'immediate',   stockKind: 'remaining' },
+  jalan: { event: 'mode_jalan', weekendMode: 'combination', stockKind: 'capacity' },
+  // urakata は切替アダプタ実装後に追加
 };
 
 const CAPACITY_SHEET_NAME = '定員マスター';
@@ -854,12 +859,17 @@ function loadHolidaySet_(fromStr, toStr) {
   return set;
 }
 
-// 基本モード：土日祝=即予約 / 平日=リクエスト
-function baseModeFor_(date, holidaySet) {
+// 金土日祝か？（通常時の基本モードが「週末側」になる日）
+function isWeekendBase_(date, holidaySet) {
   const d = new Date(date + 'T00:00:00+09:00');
-  const dow = d.getDay(); // 0=日,6=土
-  if (dow === 0 || dow === 6 || holidaySet[date]) return 'immediate';
-  return 'request';
+  const dow = d.getDay(); // 0=日, 5=金, 6=土
+  return dow === 0 || dow === 5 || dow === 6 || !!holidaySet[date];
+}
+
+// サイト別の基本モード：金土日祝はサイト設定(weekendMode)、平日はリクエスト
+function siteBaseMode_(site, weekend) {
+  if (!weekend) return 'request';
+  return MODE_SITES[site].weekendMode;
 }
 
 // その枠の強制指定（△/○/✗）を返す。日付指定→時間既定の順で探す
@@ -921,50 +931,62 @@ function syncSlotModes() {
     new Date(Date.now() + 170 * 24 * 3600 * 1000), 'Asia/Tokyo', 'yyyy-MM-dd');
   const holidaySet = loadHolidaySet_(todayStr, rangeEnd);
 
+  const changesBySite = {}; // { site: [{date,time,mode,stock}, ...] }
+  Object.keys(MODE_SITES).forEach(s => { changesBySite[s] = []; });
+
   slotKeys.forEach(key => {
     const [date, time] = key.split('|');
     if (!date || date < todayStr) return;
     const force = forceFor_(master, date, time);
     const cap = capacityFor_(master, date, time);
     const bookedN = booked[key] || 0;
-    // 基本モード：土日祝=即予約 / 平日=リクエスト（初期設定を尊重）
-    const base = baseModeFor_(date, holidaySet);
+    const weekend = isWeekendBase_(date, holidaySet);
 
-    let desiredMode, remaining;
     if (force === 'closed') {
       // 受付停止：切替アダプタ未対応のため通知せずログのみ
-      results.push({ date, time, cap, booked: bookedN, base, remaining: 0, desiredMode: 'closed(手動)' });
+      results.push({ date, time, cap, booked: bookedN, weekend, remaining: 0, perSite: 'closed(手動)' });
       return;
-    } else if (force === 'request') {
-      desiredMode = 'request';
-      remaining = cap === null ? 0 : Math.max(cap - bookedN, 0);
-    } else if (force === 'immediate') {
-      desiredMode = 'immediate';
-      remaining = cap === null ? 0 : Math.max(cap - bookedN, 0);
-    } else {
-      if (cap === null) return; // 定員未設定かつ強制なしはスキップ
-      remaining = Math.max(cap - bookedN, 0);
-      // 残1以下はリクエスト、それ以外は「基本モード」に戻す（一律の即予約にしない）
-      desiredMode = remaining <= REQUEST_THRESHOLD ? 'request' : base;
     }
-    results.push({ date, time, cap, booked: bookedN, base, remaining, desiredMode });
+    if (force !== 'request' && force !== 'immediate' && cap === null) return; // 定員未設定・強制なしはスキップ
 
-    // 前回と同じモードなら何もしない（無駄打ち防止）
-    if (state[key] === desiredMode) return;
-    changes.push({ key, date, time, mode: desiredMode, stock: remaining });
+    const remaining = cap === null ? 0 : Math.max(cap - bookedN, 0);
+    const escalate = force !== 'request' && force !== 'immediate' && remaining <= REQUEST_THRESHOLD;
+
+    // サイトごとに目標モードを決める（残1=リクエスト / 平日=リクエスト / 金土日祝=サイト基本）
+    const perSite = {};
+    Object.keys(MODE_SITES).forEach(site => {
+      let mode;
+      if (force === 'request')        mode = 'request';
+      else if (force === 'immediate') mode = 'immediate';
+      else if (escalate)              mode = 'request';
+      else                            mode = siteBaseMode_(site, weekend);
+      const stock = MODE_SITES[site].stockKind === 'capacity' ? (cap || 0) : remaining;
+      perSite[site] = mode;
+
+      // 前回と同じモードなら送らない（サイト別に状態管理）
+      const skey = `${site}|${key}`;
+      if (state[skey] === mode) return;
+      changesBySite[site].push({ date, time, mode, stock, skey });
+    });
+    results.push({ date, time, cap, booked: bookedN, weekend, remaining, perSite });
   });
 
-  Logger.log('【枠モード同期】\n' + results.map(r =>
-    `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} 基本${r.base || '-'} → ${r.desiredMode}`).join('\n'));
+  Logger.log('【枠モード同期】\n' + results.map(r => {
+    const ps = r.perSite === 'closed(手動)' ? 'closed(手動)'
+      : Object.keys(MODE_SITES).map(s => `${s}:${r.perSite[s]}`).join(' ');
+    return `${r.date} ${r.time} 定員${r.cap} 予約${r.booked} 残${r.remaining} ${r.weekend ? '金土日祝' : '平日'} → ${ps}`;
+  }).join('\n'));
 
-  // 変更分を1回のdispatchでまとめて送る（衝突・多重起動を防ぐ）
-  if (changes.length > 0) {
-    const dispatched = notifyModeBatch_(changes.map(c => ({ date: c.date, time: c.time, mode: c.mode, stock: c.stock })));
-    if (dispatched) {
-      changes.forEach(c => { state[c.key] = c.mode; });
+  // サイトごとに、変更分を1回のdispatchでまとめて送る
+  Object.keys(MODE_SITES).forEach(site => {
+    const list = changesBySite[site];
+    if (list.length === 0) return;
+    const ok = notifyModeBatch_(site, list.map(c => ({ date: c.date, time: c.time, mode: c.mode, stock: c.stock })));
+    if (ok) {
+      list.forEach(c => { state[c.skey] = c.mode; });
       saveSlotModeState_(state);
     }
-  }
+  });
   return results;
 }
 
@@ -978,14 +1000,13 @@ function syncSlotModesDryReport() {
   return r;
 }
 
-// 枠モード切替を GitHub Actions に通知（repository_dispatch）
-// 複数枠の切替を1回のdispatchでまとめて通知する。
-// changes: [{date,time,mode,stock}, ...]
-// 戻り値：少なくとも1サイトへdispatchできたら true（状態記録の可否判定に使う）
-function notifyModeBatch_(changes) {
+// 指定サイトの複数枠の切替を1回のdispatchでまとめて通知する。
+// site: 'aj' | 'jalan' ... / changes: [{date,time,mode,stock}, ...]
+// 戻り値：dispatchできたら true（状態記録の可否判定に使う）
+function notifyModeBatch_(site, changes) {
   const props = PropertiesService.getScriptProperties();
   if (props.getProperty('MODE_SYNC_ENABLED') !== 'true') {
-    Logger.log(`枠モード同期スキップ(無効): ${changes.length}件`);
+    Logger.log(`枠モード同期スキップ(無効): ${site} ${changes.length}件`);
     return false;
   }
   const token = props.getProperty('GITHUB_TOKEN');
@@ -995,7 +1016,7 @@ function notifyModeBatch_(changes) {
   const dryRun = props.getProperty('MODE_SYNC_DRY_RUN') || 'true';
   const slots = changes.map(c => ({ date: c.date, time: c.time, mode: c.mode, stock: String(c.stock) }));
   let anyOk = false;
-  Object.keys(MODE_SITES).forEach(site => {
+  {
     try {
       const res = UrlFetchApp.fetch(`https://api.github.com/repos/${repo}/dispatches`, {
         method: 'post',
@@ -1018,7 +1039,7 @@ function notifyModeBatch_(changes) {
     } catch (e) {
       Logger.log(`枠モード同期エラー ${site}: ${e.message}`);
     }
-  });
+  }
   return anyOk;
 }
 
