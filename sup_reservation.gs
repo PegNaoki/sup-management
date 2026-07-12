@@ -254,6 +254,86 @@ function registerApprovedToCalendar() {
   }
 }
 
+// ============================================================
+// 既存カレンダーイベントの整理：重複削除＋残す1件を新形式に更新
+// ------------------------------------------------------------
+// ・cleanupCalendarEventsDry()   … 何をするかログに出すだけ（削除・変更しない）
+// ・cleanupCalendarEventsApply() … 実際に重複削除＋説明文更新を行う
+//   同一予約の判定キー：予約番号（無ければ 予約日|氏名）
+// ============================================================
+function cleanupCalendarEventsDry()   { return cleanupCalendarEvents_(false); }
+function cleanupCalendarEventsApply()  { return cleanupCalendarEvents_(true); }
+
+function cleanupCalendarEvents_(apply) {
+  const ss       = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet    = getOrCreateSheet(ss);
+  const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+  if (!calendar) { Logger.log('カレンダーが見つかりません'); return; }
+
+  const data = sheet.getDataRange().getValues();
+  const gid  = sheet.getSheetId();
+
+  // カレンダーイベントIDを持つ行を、同一予約キーでグループ化
+  const groups = {}; // key -> [{ i, eventId }]
+  for (let i = 1; i < data.length; i++) {
+    const eventId = data[i][COLUMNS.CALENDAR_ID_COL - 1];
+    if (!eventId) continue;
+    const no   = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
+    const dstr = formatDateLabel(data[i][COLUMNS.DATE - 1]);
+    const nm   = String(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1] || '').replace(/\s/g, '');
+    const key  = no ? `no:${no}` : `dn:${dstr}|${nm}`;
+    (groups[key] = groups[key] || []).push({ i, eventId });
+  }
+
+  let deleted = 0, refreshed = 0, dupGroups = 0;
+  const report = [];
+
+  Object.keys(groups).forEach(key => {
+    const list = groups[key];
+    const keep = list[0];
+    const extras = list.slice(1);
+    if (extras.length > 0) dupGroups++;
+
+    // 重複（2件目以降）を削除
+    extras.forEach(ex => {
+      report.push(`削除予定: ${key} 行${ex.i + 1} event=${ex.eventId}`);
+      if (apply) {
+        try {
+          const ev = calendar.getEventById(ex.eventId);
+          if (ev) ev.deleteEvent();
+          sheet.getRange(ex.i + 1, COLUMNS.CALENDAR_ID_COL).setValue('');
+          sheet.getRange(ex.i + 1, COLUMNS.STATUS).setValue('重複削除');
+          deleted++;
+        } catch (e) { Logger.log(`削除エラー 行${ex.i + 1}: ${e.message}`); }
+      } else { deleted++; }
+    });
+
+    // 残す1件を新形式に更新（精算状況・電話番号・URLを反映）
+    const row = data[keep.i];
+    const rowUrl = `https://docs.google.com/spreadsheets/d/${CONFIG.SPREADSHEET_ID}/edit#gid=${gid}&range=A${keep.i + 1}`;
+    const { title, description } = buildCalendarEvent({
+      site: row[COLUMNS.BOOKING_SITE - 1], name: row[COLUMNS.NAME - 1], kana: row[COLUMNS.KANA - 1],
+      people: row[COLUMNS.PEOPLE - 1], peopleDetail: row[COLUMNS.PEOPLE_DETAIL - 1],
+      amount: row[COLUMNS.AMOUNT - 1], payment: row[COLUMNS.PAYMENT - 1],
+      email: row[COLUMNS.EMAIL - 1], phone: row[COLUMNS.PHONE - 1], notes: row[COLUMNS.NOTES - 1],
+      instructorNeeded: row[COLUMNS.INSTRUCTOR_NEEDED - 1], instructorName: row[COLUMNS.INSTRUCTOR_NAME - 1],
+      bookingNo: String(row[COLUMNS.BOOKING_NO - 1] || '').trim(), rowUrl,
+    });
+    report.push(`更新予定: ${key} 行${keep.i + 1} → ${title}`);
+    if (apply) {
+      try {
+        const ev = calendar.getEventById(keep.eventId);
+        if (ev) { ev.setTitle(title); ev.setDescription(description); refreshed++; }
+      } catch (e) { Logger.log(`更新エラー 行${keep.i + 1}: ${e.message}`); }
+    } else { refreshed++; }
+  });
+
+  if (apply) SpreadsheetApp.flush();
+  Logger.log(`【カレンダー整理${apply ? '（実行）' : '（ドライラン）'}】\n重複グループ:${dupGroups} / 削除:${deleted}件 / 更新:${refreshed}件\n`
+    + report.slice(0, 100).join('\n'));
+  return { dupGroups, deleted, refreshed };
+}
+
 // カレンダーイベントのタイトル・説明文を生成
 function buildCalendarEvent({ site, name, kana, people, peopleDetail, amount, payment,
                                email, phone, notes, instructorNeeded, instructorName, bookingNo, rowUrl }) {
