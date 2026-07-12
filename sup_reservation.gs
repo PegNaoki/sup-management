@@ -704,9 +704,10 @@ function normalizeSlotDate_(dateVal) {
 //   stockKind   : dispatch時に渡す stock の意味（'remaining'=残数 / 'capacity'=定員）
 // 残1のときは全サイト 'request'。
 const MODE_SITES = {
-  aj:    { event: 'mode_aj',    weekendMode: 'immediate',   stockKind: 'remaining' },
-  jalan: { event: 'mode_jalan', weekendMode: 'combination', stockKind: 'capacity' },
-  // urakata は切替アダプタ実装後に追加
+  aj:      { event: 'mode_aj',      weekendMode: 'immediate',   stockKind: 'remaining' },
+  jalan:   { event: 'mode_jalan',   weekendMode: 'combination', stockKind: 'capacity' },
+  // ウラカタは即時販売在庫の数字だけで決まる（request=0 / immediate=残り枠）
+  urakata: { event: 'mode_urakata', weekendMode: 'immediate',   stockKind: 'remaining' },
 };
 
 const CAPACITY_SHEET_NAME = '定員マスター';
