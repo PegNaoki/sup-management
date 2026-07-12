@@ -157,6 +157,10 @@ async function switchOneSlot(page, task) {
   const { date, time, mode, stock } = task;
   const target = targetLimitFor(mode, stock);
 
+  // 各枠の開始時にリロードして状態をリセット（前枠で開いたdatepicker等の持ち越しを防ぐ）
+  await page.reload({ waitUntil: 'networkidle' }).catch(() => {});
+  await page.waitForSelector('[data-test=courseName]', { timeout: 20000 });
+  await page.keyboard.press('Escape').catch(() => {});
   await jumpToDate(page, date);
   let found = await locateCell(page, date, time);
   if (!found.ok) throw new SlotSyncError(`対象枠が見つかりません: ${found.reason}`);
@@ -226,6 +230,7 @@ async function jumpToDate(page, ymd) {
     const nextBtn = page.getByRole('button', { name: 'Next Month' });
     if (await nextBtn.count() === 0) continue;
     if (!(await nextBtn.first().isVisible().catch(() => false))) continue;
+    let stuck = false;
     for (let hop = 0; hop < 18; hop++) {
       const opt = page.getByRole('option', { name: new RegExp(`Choose ${y}年${m}月${d}日`) });
       if (await opt.count() > 0 && await opt.first().isVisible().catch(() => false)) {
@@ -233,10 +238,13 @@ async function jumpToDate(page, ymd) {
         await page.waitForTimeout(1200);
         return;
       }
-      await nextBtn.first().click();
+      try {
+        await nextBtn.first().click({ timeout: 4000 });
+      } catch (e) { stuck = true; break; } // ボタンが押せない＝この textbox は不適。次の候補へ
       await page.waitForTimeout(400);
     }
-    throw new SlotSyncError(`datepickerで ${ymd} に到達できませんでした`);
+    if (!stuck) throw new SlotSyncError(`datepickerで ${ymd} に到達できませんでした`);
+    // stuck の場合は次の textbox 候補で再試行（ループ継続）
   }
   throw new SlotSyncError('datepicker（カレンダー入力欄）が見つかりませんでした');
 }
