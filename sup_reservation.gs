@@ -159,6 +159,15 @@ function importEmails_(limit) {
 
   // 取込後に容量チェック
   checkCapacityWarnings(sheet);
+
+  // 予約状況が変わったら枠モード/在庫を再同期（delta減算ではなく実状況から再計算）
+  if (newCount > 0 || updateCount > 0 || cancelCount > 0) syncModesSafely_();
+}
+
+// syncSlotModes を安全に呼ぶ（同期の失敗が取込/突合を止めないように）
+function syncModesSafely_() {
+  try { syncSlotModes(); }
+  catch (e) { Logger.log(`枠モード同期の呼び出しで例外: ${e.message}`); }
 }
 
 // ============================================================
@@ -175,13 +184,30 @@ function registerApprovedToCalendar() {
   }
 
   const data = sheet.getDataRange().getValues();
+  const gid  = sheet.getSheetId();
   let registeredCount = 0;
+
+  // 既にカレンダー登録済みの予約番号を集める（同じ予約の二重登録を防ぐ）
+  const registeredNos = {};
+  for (let r = 1; r < data.length; r++) {
+    const no  = String(data[r][COLUMNS.BOOKING_NO - 1] || '').trim();
+    const cid = data[r][COLUMNS.CALENDAR_ID_COL - 1];
+    if (no && cid) registeredNos[no] = true;
+  }
 
   for (let i = 1; i < data.length; i++) {
     const row        = data[i];
     const status     = row[COLUMNS.STATUS - 1];
     const calEventId = row[COLUMNS.CALENDAR_ID_COL - 1];
     if (status !== '承認済' || calEventId) continue;
+
+    // 二重登録ガード：同じ予約番号が既にカレンダー登録済みならスキップ
+    const bookingNo = String(row[COLUMNS.BOOKING_NO - 1] || '').trim();
+    if (bookingNo && registeredNos[bookingNo]) {
+      sheet.getRange(i + 1, COLUMNS.STATUS).setValue('カレンダー登録済(重複スキップ)');
+      Logger.log(`行${i + 1}: 予約番号 ${bookingNo} は登録済みのため重複スキップ`);
+      continue;
+    }
 
     const site               = row[COLUMNS.BOOKING_SITE - 1];
     const name               = row[COLUMNS.NAME - 1];
@@ -205,15 +231,17 @@ function registerApprovedToCalendar() {
     }
 
     const endDate = new Date(startDate.getTime() + CONFIG.EVENT_DURATION_HOURS * 3600 * 1000);
+    const rowUrl = `https://docs.google.com/spreadsheets/d/${CONFIG.SPREADSHEET_ID}/edit#gid=${gid}&range=A${i + 1}`;
     const { title, description } = buildCalendarEvent({
       site, name, kana, people, peopleDetail, amount, payment,
-      email, phone, notes, instructorNeeded, instructorName,
+      email, phone, notes, instructorNeeded, instructorName, bookingNo, rowUrl,
     });
 
     try {
       const event = calendar.createEvent(title, startDate, endDate, { description });
       sheet.getRange(i + 1, COLUMNS.STATUS).setValue('カレンダー登録済');
       sheet.getRange(i + 1, COLUMNS.CALENDAR_ID_COL).setValue(event.getId());
+      if (bookingNo) registeredNos[bookingNo] = true; // 同一予約の後続行を重複登録しない
       registeredCount++;
     } catch (e) {
       Logger.log(`行${i + 1} カレンダー登録エラー: ${e.message}`);
@@ -226,28 +254,112 @@ function registerApprovedToCalendar() {
   }
 }
 
+// ============================================================
+// 既存カレンダーイベントの整理：重複削除＋残す1件を新形式に更新
+// ------------------------------------------------------------
+// ・cleanupCalendarEventsDry()   … 何をするかログに出すだけ（削除・変更しない）
+// ・cleanupCalendarEventsApply() … 実際に重複削除＋説明文更新を行う
+//   同一予約の判定キー：予約番号（無ければ 予約日|氏名）
+// ============================================================
+function cleanupCalendarEventsDry()   { return cleanupCalendarEvents_(false); }
+function cleanupCalendarEventsApply()  { return cleanupCalendarEvents_(true); }
+
+function cleanupCalendarEvents_(apply) {
+  const ss       = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet    = getOrCreateSheet(ss);
+  const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+  if (!calendar) { Logger.log('カレンダーが見つかりません'); return; }
+
+  const data = sheet.getDataRange().getValues();
+  const gid  = sheet.getSheetId();
+
+  // カレンダーイベントIDを持つ行を、同一予約キーでグループ化
+  const groups = {}; // key -> [{ i, eventId }]
+  for (let i = 1; i < data.length; i++) {
+    const eventId = data[i][COLUMNS.CALENDAR_ID_COL - 1];
+    if (!eventId) continue;
+    const no   = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
+    const dstr = formatDateLabel(data[i][COLUMNS.DATE - 1]);
+    const nm   = String(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1] || '').replace(/\s/g, '');
+    const key  = no ? `no:${no}` : `dn:${dstr}|${nm}`;
+    (groups[key] = groups[key] || []).push({ i, eventId });
+  }
+
+  let deleted = 0, refreshed = 0, dupGroups = 0;
+  const report = [];
+
+  Object.keys(groups).forEach(key => {
+    const list = groups[key];
+    const keep = list[0];
+    const extras = list.slice(1);
+    if (extras.length > 0) dupGroups++;
+
+    // 重複（2件目以降）を削除
+    extras.forEach(ex => {
+      report.push(`削除予定: ${key} 行${ex.i + 1} event=${ex.eventId}`);
+      if (apply) {
+        try {
+          const ev = calendar.getEventById(ex.eventId);
+          if (ev) ev.deleteEvent();
+          sheet.getRange(ex.i + 1, COLUMNS.CALENDAR_ID_COL).setValue('');
+          sheet.getRange(ex.i + 1, COLUMNS.STATUS).setValue('重複削除');
+          deleted++;
+        } catch (e) { Logger.log(`削除エラー 行${ex.i + 1}: ${e.message}`); }
+      } else { deleted++; }
+    });
+
+    // 残す1件を新形式に更新（精算状況・電話番号・URLを反映）
+    const row = data[keep.i];
+    const rowUrl = `https://docs.google.com/spreadsheets/d/${CONFIG.SPREADSHEET_ID}/edit#gid=${gid}&range=A${keep.i + 1}`;
+    const { title, description } = buildCalendarEvent({
+      site: row[COLUMNS.BOOKING_SITE - 1], name: row[COLUMNS.NAME - 1], kana: row[COLUMNS.KANA - 1],
+      people: row[COLUMNS.PEOPLE - 1], peopleDetail: row[COLUMNS.PEOPLE_DETAIL - 1],
+      amount: row[COLUMNS.AMOUNT - 1], payment: row[COLUMNS.PAYMENT - 1],
+      email: row[COLUMNS.EMAIL - 1], phone: row[COLUMNS.PHONE - 1], notes: row[COLUMNS.NOTES - 1],
+      instructorNeeded: row[COLUMNS.INSTRUCTOR_NEEDED - 1], instructorName: row[COLUMNS.INSTRUCTOR_NAME - 1],
+      bookingNo: String(row[COLUMNS.BOOKING_NO - 1] || '').trim(), rowUrl,
+    });
+    report.push(`更新予定: ${key} 行${keep.i + 1} → ${title}`);
+    if (apply) {
+      try {
+        const ev = calendar.getEventById(keep.eventId);
+        if (ev) { ev.setTitle(title); ev.setDescription(description); refreshed++; }
+      } catch (e) { Logger.log(`更新エラー 行${keep.i + 1}: ${e.message}`); }
+    } else { refreshed++; }
+  });
+
+  if (apply) SpreadsheetApp.flush();
+  Logger.log(`【カレンダー整理${apply ? '（実行）' : '（ドライラン）'}】\n重複グループ:${dupGroups} / 削除:${deleted}件 / 更新:${refreshed}件\n`
+    + report.slice(0, 100).join('\n'));
+  return { dupGroups, deleted, refreshed };
+}
+
 // カレンダーイベントのタイトル・説明文を生成
 function buildCalendarEvent({ site, name, kana, people, peopleDetail, amount, payment,
-                               email, phone, notes, instructorNeeded, instructorName }) {
+                               email, phone, notes, instructorNeeded, instructorName, bookingNo, rowUrl }) {
   const needsInstructor = instructorNeeded === '必要';
   const displayName     = kana || name;
   const peopleStr       = peopleDetail || `${people}名`;
   const instructorStr   = instructorName || '未定';
+  const settled         = paymentSettled_(payment); // 精算済/未精算
 
-  // タイトル：6名以上なら先頭に【要追加インストラクター】
-  const prefix     = needsInstructor ? '【要追加インストラクター】' : '';
-  const titleParts = [`【${site}】${displayName}`, peopleStr, amount, payment].filter(Boolean);
+  // タイトル：精算状況の絵文字＋（6名以上なら要追加インストラクター）
+  const payMark    = settled === '未精算（現地払い）' ? '💰未精算 ' : settled ? '✅精算済 ' : '';
+  const prefix     = (needsInstructor ? '【要追加インストラクター】' : '') + payMark;
+  const titleParts = [`【${site}】${displayName}`, peopleStr, amount].filter(Boolean);
   const title      = prefix + titleParts.join('｜');
 
-  // 説明文
+  // 説明文（分かりやすさ優先で精算状況・電話番号を上に）
   const lines = [
+    settled      ? `精算状況: ${settled}`      : '',
+    phone        ? `電話番号: ${phone}`        : '',
     `予約者: ${name}`,
     kana         ? `フリガナ: ${kana}`        : '',
-    phone        ? `電話番号: ${phone}`        : '',
     email        ? `メール: ${email}`          : '',
     peopleDetail ? `人数内訳: ${peopleDetail}` : `人数: ${people}名`,
     amount       ? `金額: ${amount}`           : '',
     payment      ? `支払方法: ${payment}`      : '',
+    bookingNo    ? `予約番号: ${bookingNo}`    : '',
     notes        ? `備考: ${notes}`            : '',
   ];
 
@@ -257,8 +369,22 @@ function buildCalendarEvent({ site, name, kana, people, peopleDetail, amount, pa
     lines.push(`追加インストラクター担当：${instructorStr}`);
   }
 
+  if (rowUrl) {
+    lines.push('');
+    lines.push(`▼ 詳細・編集（スプレッドシート）`);
+    lines.push(rowUrl);
+  }
+
   const description = lines.filter(l => l !== null && l !== undefined).join('\n').trim();
   return { title, description };
+}
+
+// 支払方法から精算状況を判定：現地払い＝未精算 / それ以外（事前決済）＝精算済
+function paymentSettled_(payment) {
+  const p = String(payment || '').trim();
+  if (!p) return '';
+  if (/現地|当日|現金|着地|来店|店頭/.test(p)) return '未精算（現地払い）';
+  return '精算済（事前決済）';
 }
 
 // ============================================================
@@ -1301,6 +1427,9 @@ function doPost(e) {
     if (site.includes('ウラカタ'))            result = reconcileUrakataReservations_(payload);
     else if (site.includes('アクティビティ')) result = reconcileAjReservations_(payload);
     else                                       result = reconcileJalanReservations_(payload);
+    // 突合で取りこぼしを拾った後、実際の予約状況から枠モード/在庫を再同期
+    // （予約メールが来ないケースの取りこぼしもここで反映される）
+    syncModesSafely_();
     return out({ ok: true, result });
   } catch (err) {
     Logger.log('リコンサイルエラー: ' + err.message);
