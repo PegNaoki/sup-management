@@ -281,7 +281,12 @@ function cleanupCalendarEvents_(apply) {
     const no   = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
     const dstr = formatDateLabel(data[i][COLUMNS.DATE - 1]);
     const nm   = String(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1] || '').replace(/\s/g, '');
-    const key  = no ? `no:${no}` : `dn:${dstr}|${nm}`;
+    // 予約番号があれば予約番号で、無ければ「日付|氏名」で同一予約を判定。
+    // 予約番号も氏名も空の行は誤って束ねないよう、必ず単独扱い（重複判定しない）。
+    let key;
+    if (no)      key = `no:${no}`;
+    else if (nm) key = `dn:${dstr}|${nm}`;
+    else         key = `uniq:${i}`;
     (groups[key] = groups[key] || []).push({ i, eventId });
   }
 
@@ -332,6 +337,64 @@ function cleanupCalendarEvents_(apply) {
   Logger.log(`【カレンダー整理${apply ? '（実行）' : '（ドライラン）'}】\n重複グループ:${dupGroups} / 削除:${deleted}件 / 更新:${refreshed}件\n`
     + report.slice(0, 100).join('\n'));
   return { dupGroups, deleted, refreshed };
+}
+
+// ============================================================
+// カレンダーを直接スキャンして重複イベントを削除（シートに紐づかない過去分も対象）
+// ------------------------------------------------------------
+// 「同じ開始時刻 ＋ 同じ内容（精算マーク/要追加ラベルを除いた正規化タイトル）」が
+// 複数あるものだけを重複とみなし、1件だけ残して削除する。
+// 別人の予約は氏名が異なる＝正規化タイトルが異なるため消えない。
+// ・cleanupCalendarByScanDry()   … 確認のみ（削除しない）
+// ・cleanupCalendarByScanApply() … 実際に削除する
+//   既定の対象期間：今日の120日前〜300日後（環境に応じて調整可）
+// ============================================================
+function cleanupCalendarByScanDry()   { return cleanupCalendarByScan_(false); }
+function cleanupCalendarByScanApply()  { return cleanupCalendarByScan_(true); }
+
+function normTitleForDedup_(t) {
+  return String(t || '')
+    .replace(/【要追加インストラクター】/g, '')
+    .replace(/[✅💰]/g, '')
+    .replace(/精算済|未精算/g, '')
+    .replace(/\s/g, '')
+    .trim();
+}
+
+function cleanupCalendarByScan_(apply) {
+  const calendar = CalendarApp.getCalendarById(CONFIG.CALENDAR_ID);
+  if (!calendar) { Logger.log('カレンダーが見つかりません'); return; }
+
+  const now  = new Date();
+  const from = new Date(now.getTime() - 120 * 24 * 3600 * 1000);
+  const to   = new Date(now.getTime() + 300 * 24 * 3600 * 1000);
+  const events = calendar.getEvents(from, to);
+
+  // (開始時刻 + 正規化タイトル) でグループ化
+  const groups = {};
+  events.forEach(ev => {
+    const key = ev.getStartTime().toISOString() + '|' + normTitleForDedup_(ev.getTitle());
+    (groups[key] = groups[key] || []).push(ev);
+  });
+
+  let deleted = 0, dupGroups = 0;
+  const report = [];
+  Object.keys(groups).forEach(key => {
+    const list = groups[key];
+    if (list.length <= 1) return;
+    dupGroups++;
+    // 2件目以降を削除（1件だけ残す）
+    list.slice(1).forEach(ev => {
+      report.push(`削除: ${ev.getStartTime().toLocaleString()} ${ev.getTitle()}`);
+      if (apply) { try { ev.deleteEvent(); deleted++; } catch (e) { Logger.log('削除エラー: ' + e.message); } }
+      else deleted++;
+    });
+  });
+
+  Logger.log(`【カレンダー重複スキャン${apply ? '（実行）' : '（確認）'}】`
+    + `\n対象イベント:${events.length} / 重複グループ:${dupGroups} / 削除${apply ? '' : '予定'}:${deleted}件\n`
+    + report.slice(0, 150).join('\n'));
+  return { total: events.length, dupGroups, deleted };
 }
 
 // カレンダーイベントのタイトル・説明文を生成
