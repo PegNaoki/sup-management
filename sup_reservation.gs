@@ -281,7 +281,12 @@ function cleanupCalendarEvents_(apply) {
     const no   = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
     const dstr = formatDateLabel(data[i][COLUMNS.DATE - 1]);
     const nm   = String(data[i][COLUMNS.KANA - 1] || data[i][COLUMNS.NAME - 1] || '').replace(/\s/g, '');
-    const key  = no ? `no:${no}` : `dn:${dstr}|${nm}`;
+    // 予約番号があれば予約番号で、無ければ「日付|氏名」で同一予約を判定。
+    // 予約番号も氏名も空の行は誤って束ねないよう、必ず単独扱い（重複判定しない）。
+    let key;
+    if (no)      key = `no:${no}`;
+    else if (nm) key = `dn:${dstr}|${nm}`;
+    else         key = `uniq:${i}`;
     (groups[key] = groups[key] || []).push({ i, eventId });
   }
 
