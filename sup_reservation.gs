@@ -22,8 +22,10 @@ const CONFIG = {
     + ')',
 };
 
-const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定', '予約を確定しました', '予約申込みが入りました'];
-const TENTATIVE_KEYWORDS  = ['仮予約', '予約のリクエスト'];
+// 「予約申込みが入りました」はウラカタのリクエスト（仮予約）件名なので確定に入れない。
+// ウラカタ確定は「予約を確定しました」で拾う。
+const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定', '予約を確定しました'];
+const TENTATIVE_KEYWORDS  = ['仮予約', '予約のリクエスト', '予約申込みが入りました', '予約リクエストが届いています'];
 const CANCEL_KEYWORDS     = ['キャンセル通知', 'キャンセルされました', 'キャンセルのご連絡', '予約取消'];
 const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
 
@@ -1536,19 +1538,22 @@ function reconcileUrakataReservations_(payload) {
 
   // ウラカタ → シート
   for (const r of urk) {
+    if (r.status === 'キャンセル') continue; // キャンセルは追記しない
     const k = key(r.date, r.name);
     if (!sheetKeys.has(k)) {
+      // サイトのステータスを正とする。リクエスト＝仮予約（在庫連動・カレンダー登録しない）。
+      const bookingType = r.status === '仮予約' ? '仮予約' : '確定';
       const rec = {
         site: r.media && r.media.includes('アソビュー') ? 'アソビュー/satsuki' : 'Web予約',
         bookingNo: '', name: r.name || '', kana: r.name || '',
         date: String(r.date || '').replace(/-/g, '/'), time: r.time || '',
         people: r.people || '', peopleDetail: '', amount: r.price || '',
         payment: '', email: '', phone: r.phone || '',
-        notes: '（定期突合で自動追記：ウラカタ取りこぼし）',
+        notes: `（定期突合で自動追記：ウラカタ取りこぼし・${bookingType}）`,
       };
-      appendToSheet(sheet, rec, `reconcile-urk-${k}`, `【突合検出】ウラカタ ${r.name}`, '確定');
-      notifySlotReduction_(rec);   // 確定として他サイト在庫連動
-      missing.push(`${r.date} ${r.time} ${r.name} ${r.people}名`);
+      appendToSheet(sheet, rec, `reconcile-urk-${k}`, `【突合検出】ウラカタ ${r.name}`, bookingType);
+      if (bookingType === '確定') notifySlotReduction_(rec); // 確定のみ他サイト在庫連動
+      missing.push(`${r.date} ${r.time} [${bookingType}] ${r.name} ${r.people}名`);
     }
   }
 
