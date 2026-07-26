@@ -97,9 +97,13 @@ async function main() {
     }));
     log('rows_read', { count: rows.length });
 
+    // ---------- 4b. 各予約の詳細を開いてステータスを判定（方式2） ----------
+    // 行の .caret.right を展開すると [data-test="statusText"] にステータスが出る。
+    const statuses = await readStatuses(page, rows.length);
+
     // ---------- 5. 体験日が今日以降のものに整形して出力 ----------
     const todayStr = ymd(today);
-    const reservations = rows.map((r) => {
+    const reservations = rows.map((r, idx) => {
       const m = String(r.joinDate).match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
       const date = m ? `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}` : '';
       return {
@@ -107,6 +111,7 @@ async function main() {
         name: r.name, phone: r.phone,
         people: parseInt(r.people, 10) || null,
         course: r.course, price: r.price, media: r.media,
+        status: statuses[idx] || '確定',   // 確定 / 仮予約 / キャンセル
       };
     }).filter((r) => r.date && r.date >= todayStr);
 
@@ -123,7 +128,7 @@ async function main() {
 
     console.log('\n===== 今日以降の予約（ウラカタ）=====');
     for (const r of reservations) {
-      console.log(`${r.date} ${r.time} ${r.name} ${r.people}名 [${r.media}]`);
+      console.log(`${r.date} ${r.time} [${r.status}] ${r.name} ${r.people}名 [${r.media}]`);
     }
   } catch (err) {
     log('error', { message: err.message });
@@ -133,6 +138,33 @@ async function main() {
   } finally {
     await browser.close();
   }
+}
+
+// 全予約行の詳細を展開して [data-test="statusText"] からステータスを読む。
+// 一覧の DOM 順と statusText の DOM 順が一致する前提で index 対応させる。
+async function readStatuses(page, expectedCount) {
+  // .caret.right を展開すると .caret.down に変わる想定。残りが無くなるまで先頭を開く。
+  const maxIter = expectedCount + 5;
+  for (let k = 0; k < maxIter; k++) {
+    const carets = page.locator('.caret.right');
+    if (await carets.count() === 0) break;
+    await carets.first().click().catch(() => {});
+    await page.waitForTimeout(300);
+  }
+  const texts = await page.locator('[data-test="statusText"]').allInnerTexts().catch(() => []);
+  log('statuses_read', { count: texts.length, expected: expectedCount, sample: texts.slice(0, 8) });
+  if (texts.length !== expectedCount) {
+    log('statuses_count_mismatch', { got: texts.length, expected: expectedCount });
+  }
+  return texts.map(mapUrakataStatus);
+}
+
+// ステータス表示文字列 → 確定 / 仮予約 / キャンセル
+function mapUrakataStatus(t) {
+  const s = String(t || '').replace(/\s+/g, '');
+  if (s.includes('キャンセル')) return 'キャンセル';
+  if (s.includes('リクエスト') || s.includes('未確定') || s.includes('申込')) return '仮予約';
+  return '確定'; // 確定 / 参加済 など
 }
 
 // 参加日 from/to を datepicker で設定する。
