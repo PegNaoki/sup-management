@@ -173,7 +173,7 @@ function importEmails_(limit) {
   checkCapacityWarnings(sheet);
 
   // 予約状況が変わったら枠モード/在庫を再同期（delta減算ではなく実状況から再計算）
-  if (newCount > 0 || updateCount > 0 || cancelCount > 0) syncModesSafely_();
+  if (newCount > 0 || updateCount > 0 || cancelCount > 0) { syncModesSafely_(); notifyNewSafely_(); }
 }
 
 // syncSlotModes を安全に呼ぶ（同期の失敗が取込/突合を止めないように）
@@ -852,6 +852,60 @@ function sendMorningList() {
     lines.push('━━━━━━━━━━━━━', `合計 ${total}名`);
   }
   postToLine(lines.join('\n'));
+}
+
+// 前回チェック以降に新しく入った予約を通知（確定/リクエスト別・残枠つき）。
+// メール取込後・リコンサイル後に呼ぶ。LINE_NOTIFIED の「新規告知」で二重通知を防止。
+function notifyNewBookings() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const today = todayYmd_();
+  const conf = [], req = [], mark = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const nt  = String(row[COLUMNS.LINE_NOTIFIED - 1] || '');
+    if (nt.includes('新規告知')) continue;
+    const type = String(row[COLUMNS.BOOKING_TYPE - 1] || '');
+    if (type !== '確定' && type !== '仮予約') continue;
+    if (String(row[COLUMNS.STATUS - 1] || '').includes('キャンセル')) continue;
+    if (toYmd_(row[COLUMNS.DATE - 1]) < today) { mark.push(i + 1); continue; } // 過去日は通知せず既読化
+
+    const info = getSlotCapacity(sheet, row[COLUMNS.DATE - 1], row[COLUMNS.TIME - 1]);
+    const rem  = info ? `残${info.limit - info.total}名` : '残数不明';
+    const line = `・${row[COLUMNS.BOOKING_SITE - 1] || ''} ${row[COLUMNS.NAME - 1] || '（氏名未取得）'} `
+      + `${formatDateLabel(row[COLUMNS.DATE - 1])} ${normalizeSlotTime_(row[COLUMNS.TIME - 1])} ${row[COLUMNS.PEOPLE - 1] || ''}名（${rem}）`;
+    (type === '確定' ? conf : req).push(line);
+    mark.push(i + 1);
+  }
+
+  if (conf.length || req.length) {
+    const lines = ['🆕 新規予約（前回チェック以降）', '━━━━━━━━━━━━━'];
+    if (conf.length) lines.push(`✅ 確定 ${conf.length}件`, ...conf);
+    if (req.length)  lines.push(conf.length ? '' : null, `🟡 リクエスト ${req.length}件（要承認）`, ...req);
+    postToLine(lines.filter(l => l !== null).join('\n'));
+  }
+  // 通知した行・過去日行を既読化
+  mark.forEach(r => {
+    const cur = sheet.getRange(r, COLUMNS.LINE_NOTIFIED).getValue() || '';
+    if (!String(cur).includes('新規告知')) sheet.getRange(r, COLUMNS.LINE_NOTIFIED).setValue(cur ? `${cur},新規告知` : '新規告知');
+  });
+}
+function notifyNewSafely_() { try { notifyNewBookings(); } catch (e) { Logger.log(`新規予約通知で例外: ${e.message}`); } }
+
+// 初回導入時に1回だけ実行：既存の全予約を「新規告知済み」にして一斉通知を防ぐ。
+function markNewBookingBaseline() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const last  = sheet.getLastRow();
+  let n = 0;
+  for (let r = 2; r <= last; r++) {
+    const cell = sheet.getRange(r, COLUMNS.LINE_NOTIFIED);
+    const cur  = String(cell.getValue() || '');
+    if (!cur.includes('新規告知')) { cell.setValue(cur ? `${cur},新規告知` : '新規告知'); n++; }
+  }
+  Logger.log(`既存 ${n} 行を「新規告知済み」に初期化しました（以後は新しい予約のみ通知）`);
 }
 
 // 日付・時刻の表示ヘルパー
@@ -1743,6 +1797,7 @@ function doPost(e) {
     // 突合で取りこぼしを拾った後、実際の予約状況から枠モード/在庫を再同期
     // （予約メールが来ないケースの取りこぼしもここで反映される）
     syncModesSafely_();
+    notifyNewSafely_(); // 突合で新たに見つかった予約も通知
     return out({ ok: true, result });
   } catch (err) {
     Logger.log('リコンサイルエラー: ' + err.message);
