@@ -894,6 +894,27 @@ function notifyNewBookings() {
 }
 function notifyNewSafely_() { try { notifyNewBookings(); } catch (e) { Logger.log(`新規予約通知で例外: ${e.message}`); } }
 
+// 診断：前日リマインドで明日の予約が拾えるか、各行の判定結果をログに出す
+function debugDayBefore() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const target = offsetYmd_(1);
+  Logger.log(`明日(target) = ${target} / 今日 = ${todayYmd_()}`);
+  let hit = 0;
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const ymd = toYmd_(row[COLUMNS.DATE - 1]);
+    if (ymd !== target && ymd !== todayYmd_()) continue; // 今日・明日の行だけ表示
+    const type = String(row[COLUMNS.BOOKING_TYPE - 1] || '');
+    const st   = String(row[COLUMNS.STATUS - 1] || '');
+    const ok   = ymd === target && isConfirmedRow_(row);
+    if (ok) hit++;
+    Logger.log(`行${i + 1}: 日付="${row[COLUMNS.DATE - 1]}"→${ymd} / タイプ="${type}" / ステータス="${st}" / 氏名="${row[COLUMNS.NAME - 1]}" / メール="${row[COLUMNS.EMAIL - 1]}" → ${ok ? '✅対象' : '✕対象外'}`);
+  }
+  Logger.log(`明日の送信対象（確定）= ${hit}件`);
+}
+
 // 初回導入時に1回だけ実行：既存の全予約を「新規告知済み」にして一斉通知を防ぐ。
 function markNewBookingBaseline() {
   const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
