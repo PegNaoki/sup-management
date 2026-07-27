@@ -53,6 +53,16 @@ const COLUMNS = {
   CALENDAR_ID_COL:    21, // U: カレンダーイベントID
   MESSAGE_ID:         22, // V: メッセージID（重複防止）
   LINE_NOTIFIED:      23, // W: LINE通知済み
+  REMINDER_SENT:      24, // X: 事前案内メール送信済み（YYYY-MM-DD 送信日 / 空=未送信）
+};
+
+// 集合案内メールの固定情報（じゃらん掲載情報より）
+const MEETING_INFO = {
+  placeName: 'Go Retreat Aizu（秋元湖）',
+  address:   '〒969-2751 福島県耶麻郡猪苗代町若宮吾妻山甲2998-713',
+  mapUrl:    'https://maps.app.goo.gl/Sq1CkEwMwhTYdt4YA',
+  tel:       '080-2024-0863',
+  senderName:'GoRETREAT AIZU',
 };
 
 const INSTRUCTOR_THRESHOLD = 6; // 追加インストラクターが必要な人数
@@ -604,6 +614,244 @@ function postToLine(message) {
   } catch (e) {
     Logger.log(`LINE通知エラー: ${e.message}`);
   }
+}
+
+// ============================================================
+// 運用支援：前日リマインド／お客様事前案内メール／承認漏れアラート／当日集合リスト
+// ------------------------------------------------------------
+// 時間主導トリガー：
+//   sendDayBeforeReminders  … 毎晩20時（翌日分の社内まとめ＋お客様メール）
+//   checkPendingRequests    … 毎時（3時間以上未承認のリクエストを催促）
+//   sendMorningList         … 毎朝7時（本日分の集合リスト）
+// お客様メールは既定「テストモード」（自分宛て送信）。本番化は
+//   スクリプトプロパティ CUSTOMER_MAIL_MODE = 'live' で切替。
+// ============================================================
+
+// --- 小さなヘルパー ---
+function toYmd_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const m = String(v).match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  return m ? `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}` : '';
+}
+function todayYmd_()      { return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); }
+function offsetYmd_(days) { return Utilities.formatDate(new Date(Date.now() + days * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd'); }
+function startMinus5_(timeStr) {
+  const t = normalizeSlotTime_(timeStr);
+  const m = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return t;
+  let mins = Number(m[1]) * 60 + Number(m[2]) - 5;
+  if (mins < 0) mins = 0;
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+function validEmail_(e) {
+  const s = String(e || '').trim();
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+}
+// 確定予約か（予約タイプ列＝確定。仮予約/キャンセルは対象外）
+function isConfirmedRow_(row) {
+  const t = String(row[COLUMNS.BOOKING_TYPE - 1] || '');
+  const st = String(row[COLUMNS.STATUS - 1] || '');
+  if (st.includes('キャンセル')) return false;
+  return t === '確定';
+}
+
+// お客様向け案内メールの件名・本文を作る
+function buildCustomerReminderMail_(row) {
+  const name  = row[COLUMNS.NAME - 1] || 'お客様';
+  const dateY = toYmd_(row[COLUMNS.DATE - 1]);
+  const start = normalizeSlotTime_(row[COLUMNS.TIME - 1]);
+  const meet  = startMinus5_(row[COLUMNS.TIME - 1]);
+  const people= row[COLUMNS.PEOPLE_DETAIL - 1] || `${row[COLUMNS.PEOPLE - 1]}名`;
+  const plan  = row[COLUMNS.NOTES - 1] && String(row[COLUMNS.NOTES - 1]).length < 60 ? '' : ''; // プラン名は将来列追加時に差し込み
+  const dLabel = formatDateLabel(row[COLUMNS.DATE - 1]);
+
+  const subject = `【明日ご参加】秋元湖SUP体験 集合のご案内｜${MEETING_INFO.senderName}`;
+  const body =
+`${name} 様
+
+この度は${MEETING_INFO.senderName}をご予約いただきありがとうございます。
+明日のSUP体験について、集合のご案内をお送りします。
+
+■ ご予約内容
+　参加日：${dLabel}
+　集合時間：${meet}（体験 ${start}〜、所要約2時間）
+　人数：${people}
+
+■ 集合場所
+　${MEETING_INFO.placeName}
+　${MEETING_INFO.address}
+　地図：${MEETING_INFO.mapUrl}
+　※専用駐車場あり（無料・4台）
+
+■ 服装・持ち物
+　【服装】濡れてもよい服装（水着＋ラッシュガードや速乾長袖を推奨）
+　　　足元はかかとが固定できるサンダル／ウォーターシューズ
+　　　※ウェットスーツは無料貸出、ライフジャケット着用必須
+　【持ち物】着替え・タオル・飲み物・メガネストラップ
+　【あると便利】帽子（あご紐付）・サングラス（紐付）・日焼け止め・虫よけ
+
+■ トイレ・お着替え
+　集合場所にトイレはありません。車で約5分の
+　「五色沼入口観光プラザ」で事前にお済ませください。
+　体験後のお着替えは簡易テントをご用意しています。
+
+■ 集合・遅刻について
+　開始5分前までに、お着替え・トイレを済ませてお越しください。
+　10分以上遅れると当日キャンセル扱いとなる場合があります。
+
+■ 天候について
+　基本的に雨天催行です。荒天で中止の場合は、
+　前日〜開始30分前までに当方よりご連絡します。
+
+■ キャンセル規定
+　7〜4日前：30％／3〜2日前：50％／前日・当日・無連絡：100％
+
+■ 緊急連絡先（当日）
+　TEL：${MEETING_INFO.tel}
+　※体験中は電話に出られない場合があります。少し時間を空けてお掛け直しください。
+
+当日お会いできるのを楽しみにしております！
+${MEETING_INFO.senderName}`;
+  return { subject, body };
+}
+
+// 毎晩20時：翌日分のお客様メール送信＋社内まとめLINE
+function sendDayBeforeReminders() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const target = offsetYmd_(1); // 明日
+  const mode   = PropertiesService.getScriptProperties().getProperty('CUSTOMER_MAIL_MODE') || 'test';
+  const testTo = PropertiesService.getScriptProperties().getProperty('REMINDER_TEST_EMAIL') || Session.getActiveUser().getEmail();
+
+  const bySlot = {}; // time -> [{name,people,phone,mailState}]
+  const unsent = []; // メール未送信（アドレス無し等）
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (toYmd_(row[COLUMNS.DATE - 1]) !== target) continue;
+    if (!isConfirmedRow_(row)) continue; // 確定のみ
+
+    const name  = row[COLUMNS.NAME - 1] || '（氏名未取得）';
+    const phone = row[COLUMNS.PHONE - 1] || '';
+    const email = row[COLUMNS.EMAIL - 1] || '';
+    const time  = normalizeSlotTime_(row[COLUMNS.TIME - 1]) || '時間未定';
+    const alreadySent = row[COLUMNS.REMINDER_SENT - 1];
+
+    let mailState = '';
+    if (alreadySent) {
+      mailState = '📧送信済';
+    } else if (validEmail_(email)) {
+      try {
+        const { subject, body } = buildCustomerReminderMail_(row);
+        if (mode === 'live') {
+          MailApp.sendEmail({ to: email, subject, body, name: MEETING_INFO.senderName });
+        } else {
+          MailApp.sendEmail({ to: testTo, subject: `[TEST→${email}] ${subject}`,
+            body: `※テスト送信（本番の宛先: ${email}）\n\n${body}`, name: MEETING_INFO.senderName });
+        }
+        sheet.getRange(i + 1, COLUMNS.REMINDER_SENT).setValue(todayYmd_());
+        mailState = mode === 'live' ? '📧送信済' : '📧テスト送信';
+      } catch (e) {
+        mailState = '📧送信失敗';
+        Logger.log(`案内メール送信失敗 行${i + 1}: ${e.message}`);
+      }
+    } else {
+      mailState = '📧アドレス無';
+      unsent.push(`${time} ${name}（${row[COLUMNS.BOOKING_SITE - 1] || ''}）`);
+    }
+    (bySlot[time] = bySlot[time] || []).push({ name, people: row[COLUMNS.PEOPLE - 1] || '', phone, mailState });
+  }
+
+  // 社内まとめLINE
+  const times = Object.keys(bySlot).sort();
+  const lines = [`📅 明日の予約（${formatDateLabel(target)}）`, '━━━━━━━━━━━━━'];
+  if (times.length === 0) {
+    lines.push('明日の確定予約はありません');
+  } else {
+    let total = 0;
+    times.forEach(t => {
+      const list = bySlot[t];
+      const sub = list.reduce((s, x) => s + (parseInt(x.people, 10) || 0), 0);
+      total += sub;
+      lines.push(`🕐 ${t}〜　計${sub}名`);
+      list.forEach(x => lines.push(`・${x.name} ${x.people}名 ☎${x.phone || '―'} ${x.mailState}`));
+    });
+    lines.push('━━━━━━━━━━━━━', `合計 ${total}名`);
+    if (unsent.length) lines.push('', `⚠️ 案内メール未送信 ${unsent.length}件（要手動フォロー）`, ...unsent.map(u => `・${u}`));
+  }
+  if (mode !== 'live') lines.push('', '※お客様メールはテストモード（自分宛て送信）です');
+  postToLine(lines.join('\n'));
+}
+
+// 毎時：3時間以上未承認のリクエスト（仮予約）を催促
+function checkPendingRequests() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const hours = parseInt(PropertiesService.getScriptProperties().getProperty('REQUEST_ALERT_HOURS') || '3', 10);
+  const now   = Date.now();
+  const alerts = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[COLUMNS.BOOKING_TYPE - 1] || '') !== '仮予約') continue;
+    if (toYmd_(row[COLUMNS.DATE - 1]) < todayYmd_()) continue; // 過去日は除外
+    const notified = String(row[COLUMNS.LINE_NOTIFIED - 1] || '');
+    if (notified.includes('リクエスト催促')) continue; // 一度催促したら再送しない
+
+    const ts = row[COLUMNS.TIMESTAMP - 1];
+    const tms = ts instanceof Date ? ts.getTime() : Date.parse(ts);
+    if (!tms || (now - tms) < hours * 3600000) continue; // 経過3時間未満は待つ
+
+    alerts.push(`・${row[COLUMNS.BOOKING_SITE - 1] || ''} ${row[COLUMNS.NAME - 1] || ''} ${formatDateLabel(row[COLUMNS.DATE - 1])} ${normalizeSlotTime_(row[COLUMNS.TIME - 1])} ${row[COLUMNS.PEOPLE - 1] || ''}名`);
+    sheet.getRange(i + 1, COLUMNS.LINE_NOTIFIED).setValue(notified ? `${notified},リクエスト催促` : 'リクエスト催促');
+  }
+
+  if (alerts.length) {
+    postToLine(`🟡【承認漏れ注意】${hours}時間以上未承認のリクエストが${alerts.length}件あります\n━━━━━━━━━━━━━\n${alerts.join('\n')}\n\n👉 各サイト管理画面で承認/キャンセルの対応をお願いします`);
+  }
+}
+
+// 毎朝7時：本日の集合リスト（社内）
+function sendMorningList() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const target = todayYmd_();
+
+  const bySlot = {};
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (toYmd_(row[COLUMNS.DATE - 1]) !== target) continue;
+    if (!isConfirmedRow_(row)) continue;
+    const time = normalizeSlotTime_(row[COLUMNS.TIME - 1]) || '時間未定';
+    const settled = paymentSettled_(row[COLUMNS.PAYMENT - 1]);
+    (bySlot[time] = bySlot[time] || []).push({
+      name: row[COLUMNS.NAME - 1] || '（氏名未取得）',
+      people: row[COLUMNS.PEOPLE - 1] || '',
+      phone: row[COLUMNS.PHONE - 1] || '',
+      settled: settled === '未精算（現地払い）' ? '💰現地払い' : (settled ? '✅精算済' : ''),
+      amount: row[COLUMNS.AMOUNT - 1] || '',
+    });
+  }
+
+  const times = Object.keys(bySlot).sort();
+  const lines = [`☀️ 本日の予約（${formatDateLabel(target)}）`, '━━━━━━━━━━━━━'];
+  if (times.length === 0) {
+    lines.push('本日の確定予約はありません');
+  } else {
+    let total = 0;
+    times.forEach(t => {
+      const list = bySlot[t];
+      const sub = list.reduce((s, x) => s + (parseInt(x.people, 10) || 0), 0);
+      total += sub;
+      lines.push(`🕐 ${t}〜　計${sub}名`);
+      list.forEach(x => lines.push(`・${x.name} ${x.people}名 ☎${x.phone || '―'} ${x.settled}${x.settled === '💰現地払い' && x.amount ? `（${x.amount}）` : ''}`));
+    });
+    lines.push('━━━━━━━━━━━━━', `合計 ${total}名`);
+  }
+  postToLine(lines.join('\n'));
 }
 
 // 日付・時刻の表示ヘルパー
@@ -1982,6 +2230,10 @@ function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('importReservationEmails').timeBased().everyMinutes(30).create();
   ScriptApp.newTrigger('registerApprovedToCalendar').timeBased().everyHours(1).create();
+  // 運用支援
+  ScriptApp.newTrigger('sendDayBeforeReminders').timeBased().atHour(20).everyDays(1).create(); // 毎晩20時
+  ScriptApp.newTrigger('sendMorningList').timeBased().atHour(7).everyDays(1).create();          // 毎朝7時
+  ScriptApp.newTrigger('checkPendingRequests').timeBased().everyHours(1).create();              // 毎時（3時間超の未承認催促）
   Logger.log('トリガーを設定しました');
 }
 
