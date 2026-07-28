@@ -128,23 +128,24 @@ async function main() {
     const RT = process.env.RECON_TO || '';
     if (RF && RT) {
       const setJalanDates = await mng.evaluate(({ from, to }) => {
-        const cand = (kw) => {
-          const list = Array.from(document.querySelectorAll('input'));
-          return list.filter((el) => {
-            const s = `${el.id} ${el.getAttribute('name') || ''} ${el.getAttribute('placeholder') || ''}`.toLowerCase();
-            return kw.some((k) => s.includes(k));
-          });
+        const write = (id, v) => {
+          const el = document.getElementById(id);
+          if (!el) return false;
+          el.removeAttribute('readonly'); el.value = v;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
         };
-        const froms = cand(['from', 'start', 'st', 'begin', 'fr']);
-        const tos   = cand(['to', 'end', 'ed', 'until']);
-        let set = 0;
-        const write = (el, v) => { if (!el) return; el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); set++; };
-        // 体験日/実施日っぽい入力に優先で入れる
-        const expFrom = froms.find((el) => /exp|term|jisshi|taiken|perform|use|riyou|reserve/i.test(`${el.id}${el.name}`)) || froms[0];
-        const expTo   = tos.find((el) => /exp|term|jisshi|taiken|perform|use|riyou|reserve/i.test(`${el.id}${el.name}`)) || tos[0];
-        write(expFrom, from); write(expTo, to);
-        return { set, fromCand: froms.length, toCand: tos.length,
-                 fromId: expFrom ? (expFrom.id || expFrom.name) : '', toId: expTo ? (expTo.id || expTo.name) : '' };
+        // 体験日 from/to（experienceDay）
+        const okFrom = write('bookingFromDt', from);
+        const okTo   = write('bookingToDt', to);
+        // 予約ステータス（確定/仮予約/キャンセル）を全てチェックして取りこぼしを防ぐ
+        let statusChecked = 0;
+        document.querySelectorAll('input.bookingStatusCd[name="bookingStatusCdList"]').forEach((cb) => {
+          if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+          statusChecked++;
+        });
+        return { okFrom, okTo, statusChecked };
       }, { from: RF.replace(/-/g, '/'), to: RT.replace(/-/g, '/') });
       log('jalan_date_set', setJalanDates);
     }
