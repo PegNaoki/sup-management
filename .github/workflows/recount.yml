@@ -43,6 +43,7 @@ jobs:
           RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
           RECON_FROM:     ${{ github.event.inputs.recon_from }}
           RECON_TO:       ${{ github.event.inputs.recon_to }}
+          DUMP_ROW:       "true"
         run: node reconcile-urakata.js || true
 
       - name: Read activity japan

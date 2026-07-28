@@ -101,6 +101,13 @@ async function main() {
     }));
     log('rows_read', { count: rows.length });
 
+    // ---------- 4a. 診断：一覧行のDOMをダンプ（状態ラベルの場所を特定するため） ----------
+    if (process.env.DUMP_ROW === 'true') {
+      const rowDiag = await page.$$eval('table.ui.celled tbody tr', trs =>
+        trs.slice(0, 3).map(tr => tr.outerHTML.replace(/\s+/g, ' ').slice(0, 1600)));
+      rowDiag.forEach((h, i) => log('row_html_dump', { i, html: h }));
+    }
+
     // ---------- 4b. 各予約の詳細を開いてステータスを判定（方式2） ----------
     // 行の .caret.right を展開すると [data-test="statusText"] にステータスが出る。
     const statuses = await readStatuses(page, rows.length);
