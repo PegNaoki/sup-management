@@ -213,18 +213,22 @@ async function fetchAuthCode(sinceMs) {
 // 全予約行の詳細を展開して [data-test="statusText"] からステータスを読む。
 // 一覧の DOM 順と statusText の DOM 順が一致する前提で index 対応させる。
 async function readStatuses(page, expectedCount) {
-  // ウラカタの明細はアコーディオン式（1行開くと他が閉じる）。1行ずつ開いて
-  // その時に見えている statusText を読む＝行と状態を確実に対応させる。
-  const handles = await page.$$('.caret.right');
-  const statuses = [];
-  for (let i = 0; i < handles.length; i++) {
-    await handles[i].click().catch(() => {});
-    await page.waitForTimeout(500);
-    const t = await page.locator('[data-test="statusText"]').first().innerText().catch(() => '');
-    statuses[i] = mapUrakataStatus(t);
-  }
-  log('statuses_read', { count: handles.length, expected: expectedCount, sample: statuses.slice(0, 8) });
-  if (handles.length !== expectedCount) log('statuses_count_mismatch', { got: handles.length, expected: expectedCount });
+  // 各行の最後のセルのSVGアイコンの色で状態を判定（詳細を開かない＝ヘッドレスで安定）。
+  //   緑 #21BA45（丸＋チェック）＝確定 / 灰 #DCDCDC（丸＋チェック）＝リクエスト(未確定)
+  //   灰マイナス棒 #808080（path "M29 14…"）＝キャンセル/却下
+  const statuses = await page.$$eval('table.ui.celled tbody tr', (trs) => trs.map((tr) => {
+    const tds = tr.querySelectorAll('td');
+    const last = tds[tds.length - 1];
+    const path = last ? last.querySelector('svg path') : null;
+    const fill = ((path && path.getAttribute('fill')) || '').toUpperCase();
+    const d    = (path && path.getAttribute('d')) || '';
+    if (fill.includes('21BA45')) return '確定';
+    if (d.includes('M29 14') || fill.includes('808080')) return 'キャンセル';
+    if (fill.includes('DCDCDC')) return '仮予約';
+    return '確定';
+  })).catch(() => []);
+  log('statuses_read', { count: statuses.length, expected: expectedCount, sample: statuses.slice(0, 8) });
+  if (statuses.length !== expectedCount) log('statuses_count_mismatch', { got: statuses.length, expected: expectedCount });
   return statuses;
 }
 
