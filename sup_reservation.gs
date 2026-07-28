@@ -39,6 +39,21 @@ function isIgnoredEmail_(subject) {
   const s = String(subject || '');
   return IGNORE_SUBJECT_KEYWORDS.some(k => s.includes(k));
 }
+
+// ウラカタ(urkt.in)のログイン認証コードメールから最新のコードを取り出す。
+// sinceMs 指定時は「その時刻より後に届いたコード」だけを返す（使い回し防止）。
+function getLatestUrktAuthCode_(sinceMs) {
+  const threads = GmailApp.search('from:info@urkt.in 認証コード newer_than:1h', 0, 8);
+  let best = null;
+  threads.forEach(t => t.getMessages().forEach(m => {
+    if (!String(m.getSubject() || '').includes('認証コード')) return;
+    const when = m.getDate().getTime();
+    if (sinceMs && when < sinceMs) return;
+    const mm = String(m.getPlainBody() || '').match(/認証コード[　\s]*[:：]?\s*([0-9]{4,8})/);
+    if (mm && (!best || when > best.when)) best = { code: mm[1], when };
+  }));
+  return best ? best.code : '';
+}
 const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
 
 const COLUMNS = {
@@ -1820,6 +1835,11 @@ function doPost(e) {
   const expected = PropertiesService.getScriptProperties().getProperty('RECONCILE_TOKEN');
   if (!expected || payload.token !== expected) {
     return out({ ok: false, error: 'unauthorized' });
+  }
+
+  // ウラカタのログイン認証コード取得（CIの自動ログイン用）
+  if (payload.action === 'urkt_auth_code') {
+    return out({ ok: true, code: getLatestUrktAuthCode_(Number(payload.sinceMs) || 0) });
   }
 
   try {
