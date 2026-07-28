@@ -77,9 +77,11 @@ async function main() {
     await page.waitForSelector('#performSt02', { state: 'attached', timeout: 30000 });
     log('list_page_opened', { url: page.url() });
 
-    // ---------- 3. 実施日 from=今日 / to=今日+RANGE_DAYS で検索 ----------
-    const today = new Date();
-    const to = new Date(); to.setDate(today.getDate() + CONFIG.rangeDays);
+    // ---------- 3. 実施日 from/to で検索（RECON_FROM/RECON_TO 指定時は過去も読む） ----------
+    const RECON_FROM = process.env.RECON_FROM || '';
+    const RECON_TO   = process.env.RECON_TO || '';
+    const today = RECON_FROM ? new Date(RECON_FROM + 'T00:00:00') : new Date();
+    const to = RECON_TO ? new Date(RECON_TO + 'T00:00:00') : (() => { const d = new Date(today); d.setDate(today.getDate() + CONFIG.rangeDays); return d; })();
     await fillDate(page, '#performSt02', today);
     await fillDate(page, '#performEnd02', to);
     // 検索ボタンが隠れている可能性があるので force クリック
@@ -133,7 +135,7 @@ async function main() {
       if (r.status.includes('キャンセル')) status = 'キャンセル';
       else if (r.status.includes('リクエスト')) status = '仮予約';
       return { bookingNo: r.bookingNo, status, date, time, name: r.name, people: parseInt(r.people, 10) || null };
-    }).filter((r) => r.date && r.date >= todayStr);
+    }).filter((r) => r.date && (RECON_FROM ? (r.date >= RECON_FROM && r.date <= RECON_TO) : r.date >= todayStr));
 
     const result = {
       fetchedAt: new Date().toISOString(), site: 'アクティビティジャパン',

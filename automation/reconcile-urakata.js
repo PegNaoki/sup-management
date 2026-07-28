@@ -62,9 +62,11 @@ async function main() {
     await page.waitForLoadState('networkidle');
     log('search_page_opened');
 
-    // ---------- 3. 参加日 from=今日 / to=今日+RANGE_DAYS で検索 ----------
-    const today = new Date();
-    const to = new Date(); to.setDate(today.getDate() + CONFIG.rangeDays);
+    // ---------- 3. 参加日 from/to で検索（RECON_FROM/RECON_TO 指定時は過去も読む） ----------
+    const RECON_FROM = process.env.RECON_FROM || '';
+    const RECON_TO   = process.env.RECON_TO || '';
+    const today = RECON_FROM ? new Date(RECON_FROM + 'T00:00:00') : new Date();
+    const to = RECON_TO ? new Date(RECON_TO + 'T00:00:00') : (() => { const d = new Date(today); d.setDate(today.getDate() + CONFIG.rangeDays); return d; })();
     await setDateRange(page, today, to);
     await page.getByRole('button', { name: '検索' }).click();
     await page.waitForLoadState('networkidle');
@@ -108,7 +110,7 @@ async function main() {
         course: r.course, price: r.price, media: r.media,
         status: statuses[idx] || '確定',   // 確定 / 仮予約 / キャンセル
       };
-    }).filter((r) => r.date && r.date >= todayStr);
+    }).filter((r) => r.date && (RECON_FROM ? (r.date >= RECON_FROM && r.date <= RECON_TO) : r.date >= todayStr));
 
     const result = {
       fetchedAt: new Date().toISOString(),
