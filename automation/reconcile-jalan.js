@@ -143,9 +143,11 @@ async function main() {
       await mng.waitForTimeout(1200);
     }
 
-    // ---------- 5. 体験日が今日以降のものだけに絞って出力 ----------
+    // ---------- 5. 体験日で絞って出力（RECON_FROM/RECON_TO 指定時は過去も対象） ----------
+    const RECON_FROM = process.env.RECON_FROM || '';
+    const RECON_TO   = process.env.RECON_TO || '';
     const today = todayYmd();
-    const future = all.filter((r) => r.date && r.date >= today);
+    const future = all.filter((r) => r.date && (RECON_FROM ? (r.date >= RECON_FROM && r.date <= RECON_TO) : r.date >= today));
     const result = {
       fetchedAt: new Date().toISOString(),
       site: 'じゃらん',
