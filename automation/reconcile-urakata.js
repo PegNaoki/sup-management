@@ -50,8 +50,15 @@ async function main() {
   const browser = await chromium.launch({
     headless: CONFIG.headless,
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
+    args: ['--disable-blink-features=AutomationControlled'],
   });
-  const page = await browser.newPage();
+  // ヘッドレス検知で明細の展開/描画が変わり statusText が読めない問題を回避
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    locale: 'ja-JP', viewport: { width: 1440, height: 900 },
+  });
+  await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
+  const page = await context.newPage();
 
   try {
     // ---------- 1. ログイン（認証コードが要求されたらGmail経由で自動入力） ----------
@@ -199,19 +206,28 @@ async function fetchAuthCode(sinceMs) {
 // 全予約行の詳細を展開して [data-test="statusText"] からステータスを読む。
 // 一覧の DOM 順と statusText の DOM 順が一致する前提で index 対応させる。
 async function readStatuses(page, expectedCount) {
-  // .caret.right を展開すると .caret.down に変わる想定。残りが無くなるまで先頭を開く。
-  const maxIter = expectedCount + 5;
-  for (let k = 0; k < maxIter; k++) {
-    const carets = page.locator('.caret.right');
-    if (await carets.count() === 0) break;
-    await carets.first().click().catch(() => {});
-    await page.waitForTimeout(300);
+  // 各行の caret を「要素ハンドル」で1回ずつクリックして展開する（クラス変化に強い）。
+  const handles = await page.$$('.caret.right');
+  for (const h of handles) {
+    await h.click().catch(() => {});
+    await page.waitForTimeout(250);
   }
-  const texts = await page.locator('[data-test="statusText"]').allInnerTexts().catch(() => []);
+  await page.waitForTimeout(800);
+  let texts = await page.locator('[data-test="statusText"]').allInnerTexts().catch(() => []);
+
+  // 0件なら診断ダンプ（CIでのDOM把握用）
+  if (texts.length === 0) {
+    const diag = await page.evaluate(() => ({
+      caretRight: document.querySelectorAll('.caret.right').length,
+      caretDown:  document.querySelectorAll('.caret.down').length,
+      statusText: document.querySelectorAll('[data-test=statusText]').length,
+      firstRowHtml: (document.querySelector('table.ui.celled tbody tr') || {}).outerHTML?.slice(0, 800) || '',
+    })).catch(() => ({}));
+    log('statuses_zero_diag', diag);
+  }
+
   log('statuses_read', { count: texts.length, expected: expectedCount, sample: texts.slice(0, 8) });
-  if (texts.length !== expectedCount) {
-    log('statuses_count_mismatch', { got: texts.length, expected: expectedCount });
-  }
+  if (texts.length !== expectedCount) log('statuses_count_mismatch', { got: texts.length, expected: expectedCount });
   return texts.map(mapUrakataStatus);
 }
 
