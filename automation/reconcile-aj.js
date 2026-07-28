@@ -77,6 +77,21 @@ async function main() {
     await page.waitForSelector('#performSt02', { state: 'attached', timeout: 30000 });
     log('list_page_opened', { url: page.url() });
 
+    // 検索フォームの入力欄をダンプ（実施日from/toの正しい id を特定するため）
+    if (process.env.DUMP_FORM === 'true') {
+      const fields = await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll('input, select').forEach((el) => {
+          const s = `${el.id} ${el.getAttribute('name') || ''} ${el.getAttribute('placeholder') || ''}`;
+          if (/perform|date|日|st|end|from|to|jisshi|実施/i.test(s) || el.type === 'date' || el.type === 'text') {
+            out.push({ tag: el.tagName.toLowerCase(), type: el.getAttribute('type') || '', id: el.id || '', name: el.getAttribute('name') || '', placeholder: el.getAttribute('placeholder') || '' });
+          }
+        });
+        return out.slice(0, 40);
+      });
+      log('aj_form_dump', { fields });
+    }
+
     // ---------- 3. 実施日 from/to で検索（RECON_FROM/RECON_TO 指定時は過去も読む） ----------
     const RECON_FROM = process.env.RECON_FROM || '';
     const RECON_TO   = process.env.RECON_TO || '';
