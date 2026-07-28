@@ -117,7 +117,7 @@ async function main() {
           const t = el.textContent.replace(/\s+/g, ' ').trim();
           if (/日|期間|検索|ステータス|状態/.test(t) && t.length < 20) labels.push(t);
         });
-        return { fields, labels };
+        return { fields: out, labels };
       });
       log('form_dump', fields);
     }
