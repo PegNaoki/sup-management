@@ -42,6 +42,8 @@ jobs:
         env:
           URKT_ID:        ${{ secrets.URKT_ID }}
           URKT_PASSWORD:  ${{ secrets.URKT_PASSWORD }}
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
           SLOTS:      ${{ toJSON(github.event.client_payload.slots) != 'null' && toJSON(github.event.client_payload.slots) || github.event.inputs.slots }}
           SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
           SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
