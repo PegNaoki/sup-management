@@ -206,35 +206,25 @@ async function fetchAuthCode(sinceMs) {
 // 全予約行の詳細を展開して [data-test="statusText"] からステータスを読む。
 // 一覧の DOM 順と statusText の DOM 順が一致する前提で index 対応させる。
 async function readStatuses(page, expectedCount) {
-  // 各行の caret を「要素ハンドル」で1回ずつクリックして展開する（クラス変化に強い）。
+  // ウラカタの明細はアコーディオン式（1行開くと他が閉じる）。1行ずつ開いて
+  // その時に見えている statusText を読む＝行と状態を確実に対応させる。
   const handles = await page.$$('.caret.right');
-  for (const h of handles) {
-    await h.click().catch(() => {});
-    await page.waitForTimeout(250);
+  const statuses = [];
+  for (let i = 0; i < handles.length; i++) {
+    await handles[i].click().catch(() => {});
+    await page.waitForTimeout(500);
+    const t = await page.locator('[data-test="statusText"]').first().innerText().catch(() => '');
+    statuses[i] = mapUrakataStatus(t);
   }
-  await page.waitForTimeout(800);
-  let texts = await page.locator('[data-test="statusText"]').allInnerTexts().catch(() => []);
-
-  // 0件なら診断ダンプ（CIでのDOM把握用）
-  if (texts.length === 0) {
-    const diag = await page.evaluate(() => ({
-      caretRight: document.querySelectorAll('.caret.right').length,
-      caretDown:  document.querySelectorAll('.caret.down').length,
-      statusText: document.querySelectorAll('[data-test=statusText]').length,
-      firstRowHtml: (document.querySelector('table.ui.celled tbody tr') || {}).outerHTML?.slice(0, 800) || '',
-    })).catch(() => ({}));
-    log('statuses_zero_diag', diag);
-  }
-
-  log('statuses_read', { count: texts.length, expected: expectedCount, sample: texts.slice(0, 8) });
-  if (texts.length !== expectedCount) log('statuses_count_mismatch', { got: texts.length, expected: expectedCount });
-  return texts.map(mapUrakataStatus);
+  log('statuses_read', { count: handles.length, expected: expectedCount, sample: statuses.slice(0, 8) });
+  if (handles.length !== expectedCount) log('statuses_count_mismatch', { got: handles.length, expected: expectedCount });
+  return statuses;
 }
 
 // ステータス表示文字列 → 確定 / 仮予約 / キャンセル
 function mapUrakataStatus(t) {
   const s = String(t || '').replace(/\s+/g, '');
-  if (s.includes('キャンセル')) return 'キャンセル';
+  if (s.includes('キャンセル') || s.includes('お断り') || s.includes('断り') || s.includes('不成立')) return 'キャンセル';
   if (s.includes('リクエスト') || s.includes('未確定') || s.includes('申込')) return '仮予約';
   return '確定'; // 確定 / 参加済 など
 }
