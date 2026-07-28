@@ -69,6 +69,8 @@ jobs:
           URKT_ID:       ${{ secrets.URKT_ID }}
           URKT_PASSWORD: ${{ secrets.URKT_PASSWORD }}
           HEADLESS:      "true"
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
         run: node reconcile-urakata.js
 
       - name: Post urakata to GAS for reconciliation

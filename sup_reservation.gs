@@ -27,6 +27,33 @@ const CONFIG = {
 const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定', '予約を確定しました'];
 const TENTATIVE_KEYWORDS  = ['仮予約', '予約のリクエスト', '予約申込みが入りました', '予約リクエストが届いています'];
 const CANCEL_KEYWORDS     = ['キャンセル通知', 'キャンセルされました', 'キャンセルのご連絡', '予約取消'];
+// 予約通知ではない（取り込まない）メールの件名キーワード。
+// 認証コード／お客様宛ての中間通知など、予約データを持たないもの。
+const IGNORE_SUBJECT_KEYWORDS = [
+  '認証コード', 'ログイン',
+  '予約申込み中', 'お取りできませんでした', 'お取りできません',
+  'まだ予約は確定しておりません', '予約へお進みください',
+  'パスワード',
+];
+function isIgnoredEmail_(subject) {
+  const s = String(subject || '');
+  return IGNORE_SUBJECT_KEYWORDS.some(k => s.includes(k));
+}
+
+// ウラカタ(urkt.in)のログイン認証コードメールから最新のコードを取り出す。
+// sinceMs 指定時は「その時刻より後に届いたコード」だけを返す（使い回し防止）。
+function getLatestUrktAuthCode_(sinceMs) {
+  const threads = GmailApp.search('from:info@urkt.in 認証コード newer_than:1h', 0, 8);
+  let best = null;
+  threads.forEach(t => t.getMessages().forEach(m => {
+    if (!String(m.getSubject() || '').includes('認証コード')) return;
+    const when = m.getDate().getTime();
+    if (sinceMs && when < sinceMs) return;
+    const mm = String(m.getPlainBody() || '').match(/認証コード[　\s]*[:：]?\s*([0-9]{4,8})/);
+    if (mm && (!best || when > best.when)) best = { code: mm[1], when };
+  }));
+  return best ? best.code : '';
+}
 const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
 
 const COLUMNS = {
@@ -94,6 +121,7 @@ function importUrktHistoricalEmails() {
       if (existing.byMsgId.has(msgId)) { skipCount++; return; }
 
       const subject     = message.getSubject();
+      if (isIgnoredEmail_(subject)) return; // 認証コード等、予約でないメールは無視
       const bookingType = detectBookingType(subject);
       const r           = parseEmail(message);
       if (!r) return;
@@ -131,6 +159,7 @@ function importEmails_(limit) {
       if (existing.byMsgId.has(msgId)) return;
 
       const subject     = message.getSubject();
+      if (isIgnoredEmail_(subject)) return; // 認証コード等、予約でないメールは無視
       const bookingType = detectBookingType(subject);
       const r           = parseEmail(message);
       if (!r) return;
@@ -893,6 +922,27 @@ function notifyNewBookings() {
   });
 }
 function notifyNewSafely_() { try { notifyNewBookings(); } catch (e) { Logger.log(`新規予約通知で例外: ${e.message}`); } }
+
+// 診断：前日リマインドで明日の予約が拾えるか、各行の判定結果をログに出す
+function debugDayBefore() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const target = offsetYmd_(1);
+  Logger.log(`明日(target) = ${target} / 今日 = ${todayYmd_()}`);
+  let hit = 0;
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const ymd = toYmd_(row[COLUMNS.DATE - 1]);
+    if (ymd !== target && ymd !== todayYmd_()) continue; // 今日・明日の行だけ表示
+    const type = String(row[COLUMNS.BOOKING_TYPE - 1] || '');
+    const st   = String(row[COLUMNS.STATUS - 1] || '');
+    const ok   = ymd === target && isConfirmedRow_(row);
+    if (ok) hit++;
+    Logger.log(`行${i + 1}: 日付="${row[COLUMNS.DATE - 1]}"→${ymd} / タイプ="${type}" / ステータス="${st}" / 氏名="${row[COLUMNS.NAME - 1]}" / メール="${row[COLUMNS.EMAIL - 1]}" → ${ok ? '✅対象' : '✕対象外'}`);
+  }
+  Logger.log(`明日の送信対象（確定）= ${hit}件`);
+}
 
 // 初回導入時に1回だけ実行：既存の全予約を「新規告知済み」にして一斉通知を防ぐ。
 function markNewBookingBaseline() {
@@ -1785,6 +1835,11 @@ function doPost(e) {
   const expected = PropertiesService.getScriptProperties().getProperty('RECONCILE_TOKEN');
   if (!expected || payload.token !== expected) {
     return out({ ok: false, error: 'unauthorized' });
+  }
+
+  // ウラカタのログイン認証コード取得（CIの自動ログイン用）
+  if (payload.action === 'urkt_auth_code') {
+    return out({ ok: true, code: getLatestUrktAuthCode_(Number(payload.sinceMs) || 0) });
   }
 
   try {
