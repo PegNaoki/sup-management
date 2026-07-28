@@ -99,6 +99,17 @@ async function main() {
     const to = RECON_TO ? new Date(RECON_TO + 'T00:00:00') : (() => { const d = new Date(today); d.setDate(today.getDate() + CONFIG.rangeDays); return d; })();
     await fillDate(page, '#performSt02', today);
     await fillDate(page, '#performEnd02', to);
+    // 予約ステータスのチェックボックス（reservationStatus[1..13]）を全てONにする。
+    // 未チェックだと結果が0件になるため、全ステータスを対象にして取りこぼしを防ぐ。
+    const checked = await page.evaluate(() => {
+      let n = 0;
+      document.querySelectorAll('input[type=checkbox][name^="reservationStatus"]').forEach((cb) => {
+        if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+        n++;
+      });
+      return n;
+    });
+    log('status_checked', { count: checked });
     // 検索ボタンが隠れている可能性があるので force クリック
     await page.getByRole('button', { name: '条件で検索する' }).click({ force: true });
     await page.waitForLoadState('networkidle');
