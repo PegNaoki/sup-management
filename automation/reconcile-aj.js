@@ -150,6 +150,28 @@ async function main() {
       await page.waitForTimeout(1500);
     }
 
+    // 0件のときは切り分けプローブ：日付フィルタを外して再検索し、AJに予約が1件でも存在するか確認
+    if (all.length === 0) {
+      await page.evaluate(() => {
+        ['performSt02', 'performEnd02'].forEach((id) => {
+          const el = document.getElementById(id);
+          if (el) { el.removeAttribute('readonly'); el.value = ''; el.dispatchEvent(new Event('change', { bubbles: true })); }
+        });
+        document.querySelectorAll('input[type=checkbox][name^="reservationStatus"]').forEach((cb) => {
+          if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+        });
+      });
+      await page.getByRole('button', { name: '条件で検索する' }).click({ force: true }).catch(() => {});
+      await page.waitForTimeout(2500);
+      const probe = await page.$$eval('tr.date-url-target', (trs) => trs.slice(0, 8).map((tr) => {
+        let perform = '';
+        tr.querySelectorAll('td').forEach((td) => { const t = td.textContent.replace(/\s+/g, ' ').trim(); if (/\d{4}-\d{1,2}-\d{1,2}/.test(t) && !perform) perform = t; });
+        const nameB = tr.querySelector('td b');
+        return { perform, name: nameB ? nameB.textContent.trim() : '' };
+      })).catch(() => []);
+      log('aj_probe_nofilter', { total: probe.length, sample: probe });
+    }
+
     // ---------- 5. 体験日が今日以降に整形（キャンセルは除外して有効のみ） ----------
     const todayStr = ymd(today);
     const reservations = all.map((r) => {
