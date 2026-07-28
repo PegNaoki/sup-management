@@ -27,6 +27,18 @@ const CONFIG = {
 const CONFIRMED_KEYWORDS  = ['予約確定', '即時確定', '決済完了', '予約が確定', '予約を確定しました'];
 const TENTATIVE_KEYWORDS  = ['仮予約', '予約のリクエスト', '予約申込みが入りました', '予約リクエストが届いています'];
 const CANCEL_KEYWORDS     = ['キャンセル通知', 'キャンセルされました', 'キャンセルのご連絡', '予約取消'];
+// 予約通知ではない（取り込まない）メールの件名キーワード。
+// 認証コード／お客様宛ての中間通知など、予約データを持たないもの。
+const IGNORE_SUBJECT_KEYWORDS = [
+  '認証コード', 'ログイン',
+  '予約申込み中', 'お取りできませんでした', 'お取りできません',
+  'まだ予約は確定しておりません', '予約へお進みください',
+  'パスワード',
+];
+function isIgnoredEmail_(subject) {
+  const s = String(subject || '');
+  return IGNORE_SUBJECT_KEYWORDS.some(k => s.includes(k));
+}
 const CHANGE_KEYWORDS     = ['変更通知', '変更されました', '内容が変更'];
 
 const COLUMNS = {
@@ -94,6 +106,7 @@ function importUrktHistoricalEmails() {
       if (existing.byMsgId.has(msgId)) { skipCount++; return; }
 
       const subject     = message.getSubject();
+      if (isIgnoredEmail_(subject)) return; // 認証コード等、予約でないメールは無視
       const bookingType = detectBookingType(subject);
       const r           = parseEmail(message);
       if (!r) return;
@@ -131,6 +144,7 @@ function importEmails_(limit) {
       if (existing.byMsgId.has(msgId)) return;
 
       const subject     = message.getSubject();
+      if (isIgnoredEmail_(subject)) return; // 認証コード等、予約でないメールは無視
       const bookingType = detectBookingType(subject);
       const r           = parseEmail(message);
       if (!r) return;
