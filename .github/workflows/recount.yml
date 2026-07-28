@@ -31,6 +31,7 @@ jobs:
           HEADLESS:       "true"
           RECON_FROM:     ${{ github.event.inputs.recon_from }}
           RECON_TO:       ${{ github.event.inputs.recon_to }}
+          DUMP_FORM:      "true"
         run: node reconcile-jalan.js || true
 
       - name: Read urakata
@@ -54,6 +55,7 @@ jobs:
           HEADLESS:    "true"
           RECON_FROM:  ${{ github.event.inputs.recon_from }}
           RECON_TO:    ${{ github.event.inputs.recon_to }}
+          DUMP_FORM:   "true"
         run: node reconcile-aj.js || true
 
       - name: Upload JSON

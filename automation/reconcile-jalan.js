@@ -97,6 +97,58 @@ async function main() {
     await mng.goto('https://activityboard.jp/activityboard/booking/list/?from=header', { waitUntil: 'networkidle' });
     log('search_page_opened', { url: mng.url() });
 
+    // 検索フォームの入力欄をダンプ（体験日from/toの id / name を特定するため）
+    if (process.env.DUMP_FORM === 'true') {
+      const fields = await mng.evaluate(() => {
+        const out = [];
+        document.querySelectorAll('input, select').forEach((el) => {
+          out.push({
+            tag: el.tagName.toLowerCase(),
+            type: el.getAttribute('type') || '',
+            id: el.id || '',
+            name: el.getAttribute('name') || '',
+            placeholder: el.getAttribute('placeholder') || '',
+            className: (el.className || '').toString().slice(0, 60),
+          });
+        });
+        // 「体験日」「期間」などのラベル近傍も拾う
+        const labels = [];
+        document.querySelectorAll('label, th, .form-label, dt').forEach((el) => {
+          const t = el.textContent.replace(/\s+/g, ' ').trim();
+          if (/日|期間|検索|ステータス|状態/.test(t) && t.length < 20) labels.push(t);
+        });
+        return { fields, labels };
+      });
+      log('form_dump', fields);
+    }
+
+    // 体験日レンジを検索条件にセット（RECON_FROM/RECON_TO 指定時）。
+    // 入力欄の id/name が確定するまでは複数の候補セレクタに順に流し込む。
+    const RF = process.env.RECON_FROM || '';
+    const RT = process.env.RECON_TO || '';
+    if (RF && RT) {
+      const setJalanDates = await mng.evaluate(({ from, to }) => {
+        const cand = (kw) => {
+          const list = Array.from(document.querySelectorAll('input'));
+          return list.filter((el) => {
+            const s = `${el.id} ${el.getAttribute('name') || ''} ${el.getAttribute('placeholder') || ''}`.toLowerCase();
+            return kw.some((k) => s.includes(k));
+          });
+        };
+        const froms = cand(['from', 'start', 'st', 'begin', 'fr']);
+        const tos   = cand(['to', 'end', 'ed', 'until']);
+        let set = 0;
+        const write = (el, v) => { if (!el) return; el.removeAttribute('readonly'); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); set++; };
+        // 体験日/実施日っぽい入力に優先で入れる
+        const expFrom = froms.find((el) => /exp|term|jisshi|taiken|perform|use|riyou|reserve/i.test(`${el.id}${el.name}`)) || froms[0];
+        const expTo   = tos.find((el) => /exp|term|jisshi|taiken|perform|use|riyou|reserve/i.test(`${el.id}${el.name}`)) || tos[0];
+        write(expFrom, from); write(expTo, to);
+        return { set, fromCand: froms.length, toCand: tos.length,
+                 fromId: expFrom ? (expFrom.id || expFrom.name) : '', toId: expTo ? (expTo.id || expTo.name) : '' };
+      }, { from: RF.replace(/-/g, '/'), to: RT.replace(/-/g, '/') });
+      log('jalan_date_set', setJalanDates);
+    }
+
     await mng.getByRole('button', { name: '検索する' }).click();
     await mng.waitForSelector('#bookingSearchList tr', { timeout: 20000 });
     log('search_done');
