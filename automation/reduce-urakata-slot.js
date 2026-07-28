@@ -88,13 +88,8 @@ async function main() {
   let result = 'unknown';
 
   try {
-    // ---------- 1. ログイン ----------
-    await page.goto(CONFIG.topUrl, { waitUntil: 'networkidle' });
-    await page.getByRole('textbox', { name: 'ログインID' }).fill(CONFIG.id);
-    await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
-    await page.getByRole('button', { name: 'ログイン' }).click();
-    await page.waitForLoadState('networkidle');
-    log('login_ok');
+    // ---------- 1. ログイン（認証コードが要求されたらGmail経由で自動入力） ----------
+    await urakataLogin(page, CONFIG.topUrl, CONFIG.id, CONFIG.password, '予約枠');
 
     // ---------- 2. 予約枠ページへ ----------
     await page.getByRole('link', { name: '予約枠' }).click();
@@ -298,6 +293,56 @@ async function readLimit(cell) {
 
 async function shot(p) {
   await p.screenshot({ path: 'error-urakata.png', fullPage: true }).catch(() => {});
+}
+
+// ウラカタにログイン。認証コード（2段階認証）が要求されたら、GAS経由でGmailから
+// 最新コードを取得して入力する。landingName はログイン後に現れるリンク名（例 '予約枠'）。
+async function urakataLogin(page, url, id, password, landingName) {
+  await page.goto(url, { waitUntil: 'networkidle' });
+  await page.getByRole('textbox', { name: 'ログインID' }).fill(id);
+  await page.getByRole('textbox', { name: 'パスワード' }).fill(password);
+  const loginStart = Date.now() - 3000;
+  await page.getByRole('button', { name: 'ログイン' }).click();
+  await page.waitForTimeout(3000);
+
+  const landing = page.getByRole('link', { name: landingName });
+  const loggedIn = async () => (await landing.count()) > 0 && await landing.first().isVisible().catch(() => false);
+  if (await loggedIn()) { log('login_ok'); return; }
+
+  const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+  if (/認証コード|認証番号|コードを入力|ワンタイム/.test(bodyText)) {
+    log('auth_code_required');
+    const code = await fetchAuthCode(loginStart);
+    if (!code) throw new SlotSyncError('認証コードをGmail(GAS)から取得できませんでした');
+    log('auth_code_fetched', { code: '****' + code.slice(-2) });
+    let input = page.locator('input:visible').first();
+    if (await input.count() === 0) input = page.locator('input[type=text], input[type=tel], input[type=number], input:not([type])').first();
+    await input.fill(code);
+    const btn = page.getByRole('button', { name: /認証|ログイン|送信|確認|次へ/ }).first();
+    if (await btn.count() > 0) await btn.click(); else await input.press('Enter');
+    await page.waitForLoadState('networkidle').catch(() => {});
+  }
+  await landing.first().waitFor({ state: 'visible', timeout: 20000 });
+  log('login_ok');
+}
+
+async function fetchAuthCode(sinceMs) {
+  const gurl = process.env.GAS_RECONCILE_URL, token = process.env.RECONCILE_TOKEN;
+  if (!gurl || !token) throw new SlotSyncError('GAS_RECONCILE_URL / RECONCILE_TOKEN 未設定（認証コード取得に必要）');
+  const deadline = Date.now() + 50000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(gurl, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, action: 'urkt_auth_code', sinceMs }), redirect: 'follow',
+      });
+      const txt = await res.text();
+      const m = txt.match(/\{[\s\S]*\}/);
+      if (m) { const j = JSON.parse(m[0]); if (j && j.code) return String(j.code); }
+    } catch (e) { /* retry */ }
+    await new Promise(r => setTimeout(r, 4000));
+  }
+  return '';
 }
 
 main();
