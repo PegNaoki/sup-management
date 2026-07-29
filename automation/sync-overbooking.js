@@ -110,17 +110,31 @@ function parseDateHeader(s) {
 }
 function fmt(y, mo, da) { return `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`; }
 
+// 公開URLをCSV取得用に補正する（pubhtml→pub、output=csv付与）
+function toCsvUrl(url) {
+  let u = String(url || '');
+  u = u.replace('/pubhtml', '/pub');
+  if (!/[?&]output=csv/.test(u)) u += (u.includes('?') ? '&' : '?') + 'output=csv';
+  return u;
+}
+
 async function loadCapacity() {
   if (!CONFIG.capacityCsvUrl) throw new Error('CAPACITY_CSV_URL が未設定です（定員マスターのCSV公開URL）');
-  const res = await fetch(CONFIG.capacityCsvUrl, { redirect: 'follow' });
+  const url = toCsvUrl(CONFIG.capacityCsvUrl);
+  const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) throw new Error(`定員マスターCSV取得失敗: HTTP ${res.status}`);
-  const rows = parseCsv(await res.text());
+  const text = await res.text();
+  const rows = parseCsv(text);
   if (rows.length < 2) throw new Error('定員マスターCSVが空です');
   const header = rows[0];
   const dateCols = [];
   for (let c = 2; c < header.length; c++) {           // C列(index2)以降が日付
     const d = parseDateHeader(header[c]);
     if (d) dateCols.push({ col: c, date: d });
+  }
+  log('capacity_loaded', { rows: rows.length, dateCols: dateCols.length, header: header.slice(0, 6) });
+  if (dateCols.length === 0) {
+    log('capacity_warn', { note: '日付列を認識できません（CSVでない可能性）', head: text.slice(0, 160) });
   }
   const out = [];
   for (let r = 1; r < rows.length; r++) {
