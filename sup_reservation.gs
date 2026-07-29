@@ -2386,6 +2386,45 @@ function setupTriggers() {
 }
 
 // ============================================================
+// 顧客リマインドメールの本番/テスト切替（関数を1回実行するだけ）
+// ============================================================
+// ・enableCustomerMailLive()  … 本番送信ON（実際のお客様アドレスへ送る）
+// ・disableCustomerMailLive() … テストに戻す（自分宛てに送る）
+// ・checkCustomerMailMode()   … 現在の状態を確認
+function enableCustomerMailLive() {
+  PropertiesService.getScriptProperties().setProperty('CUSTOMER_MAIL_MODE', 'live');
+  Logger.log('✅ 顧客リマインドメールを【本番(live)】にしました。毎晩20時に翌日の確定予約のお客様へ実送信します。');
+}
+function disableCustomerMailLive() {
+  PropertiesService.getScriptProperties().setProperty('CUSTOMER_MAIL_MODE', 'test');
+  Logger.log('🧪 顧客リマインドメールを【テスト(test)】に戻しました。送信先は自分宛てのみです。');
+}
+function checkCustomerMailMode() {
+  const mode = PropertiesService.getScriptProperties().getProperty('CUSTOMER_MAIL_MODE') || 'test';
+  const testTo = PropertiesService.getScriptProperties().getProperty('REMINDER_TEST_EMAIL') || Session.getActiveUser().getEmail();
+  Logger.log(`現在のモード: ${mode}（${mode === 'live' ? '本番＝お客様へ実送信' : 'テスト＝' + testTo + ' へ送信'}）`);
+  return mode;
+}
+
+// 本番投入前の動作確認：明日分に限らず「直近の確定予約1件」の案内メールを
+// 自分宛てにプレビュー送信する（本文の最終チェック用。REMINDER_SENTは更新しない）。
+function previewCustomerReminderMail() {
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const to    = PropertiesService.getScriptProperties().getProperty('REMINDER_TEST_EMAIL') || Session.getActiveUser().getEmail();
+  for (let i = 1; i < data.length; i++) {
+    if (!isConfirmedRow_(data[i])) continue;
+    if (toYmd_(data[i][COLUMNS.DATE - 1]) < todayYmd_()) continue; // 今日以降の確定
+    const { subject, body } = buildCustomerReminderMail_(data[i]);
+    MailApp.sendEmail({ to, subject: `[PREVIEW] ${subject}`, body, name: MEETING_INFO.senderName });
+    Logger.log(`プレビュー送信しました → ${to}（対象行 ${i + 1}）`);
+    return;
+  }
+  Logger.log('今日以降の確定予約が見つからずプレビューできませんでした。');
+}
+
+// ============================================================
 // 手動テスト用
 // ============================================================
 function testParseLatestEmail() {
