@@ -210,21 +210,22 @@ async function fetchAuthCode(sinceMs) {
   return '';
 }
 
-// 各行の最後のセルのアイコンSVGで状態を判定（詳細は展開しない＝ヘッドレスで安定）。
-// 実データ（仮予約の実例含む）で確認した対応：
-//   マイナス棒  path "M29 14…" / fill #808080          ＝ キャンセル/却下
-//   オレンジR   fill #FF9500（リクエストの「R」グリフ）＝ 仮予約(リクエスト・未承認)
-//   丸＋チェック fill 緑#21BA45 または 灰#DCDCDC        ＝ 確定
+// 各行の最後のセルのアイコンSVGの「パス形状(d)」で状態を判定する。
+// ウラカタは色を currentColor（CSSクラス）で塗るため #色 は当てにならない。形状は状態固有：
+//   チェック "M21.994 9.29102…"                 ＝ 確定
+//   「R」字  "M10.6721 8.79797…"（リクエスト字形）＝ 仮予約(リクエスト・未承認)
+//   ×       "M22.3 11.522…" / 横棒 "M29 14…"     ＝ キャンセル/却下
 async function readStatuses(page, expectedCount) {
   const statuses = await page.$$eval('table.ui.celled tbody tr', (trs) => trs.map((tr) => {
     const tds   = tr.querySelectorAll('td');
     const last  = tds[tds.length - 1];
     const paths = last ? Array.from(last.querySelectorAll('svg path')) : [];
+    const ds    = paths.map((p) => p.getAttribute('d') || '').join(' ');
     const fills = paths.map((p) => (p.getAttribute('fill') || '').toUpperCase());
-    const ds    = paths.map((p) => p.getAttribute('d') || '');
-    if (ds.some((d) => d.includes('M29 14')) || fills.includes('#808080')) return 'キャンセル';
-    if (fills.includes('#FF9500')) return '仮予約';   // オレンジのリクエスト(R)マーク
-    return '確定';                                     // 緑/灰の丸＋チェック
+    if (ds.includes('M22.3 11.522') || ds.includes('M29 14') || fills.includes('#808080')) return 'キャンセル';
+    if (ds.includes('M10.6721')) return '仮予約';   // 「R」＝リクエスト字形
+    if (ds.includes('M21.994')) return '確定';       // チェックマーク
+    return '確定';                                    // 不明時は確定扱い
   })).catch(() => []);
   log('statuses_read', { count: statuses.length, expected: expectedCount, sample: statuses.slice(0, 8) });
   if (statuses.length !== expectedCount) log('statuses_count_mismatch', { got: statuses.length, expected: expectedCount });
