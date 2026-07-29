@@ -1876,7 +1876,9 @@ function reconcileUrakataReservations_(payload) {
   const key = (date, kana) => `${date}|${normName(kana)}`;
 
   const urk = (payload.reservations || []);
-  const urkKeys = new Set(urk.map(r => key(r.date, r.name)));
+  // key -> サイト側ステータス（確定/仮予約/キャンセル）。一覧に載っていれば必ず入る。
+  const urkByKey = new Map();
+  urk.forEach(r => urkByKey.set(key(r.date, r.name), r.status || '確定'));
 
   // シート側のウラカタ系（アソビュー/ウラカタ/Web予約）有効予約をマップ化
   const sheetKeys = new Map(); // key -> rowNum
@@ -1891,10 +1893,11 @@ function reconcileUrakataReservations_(payload) {
     sheetKeys.set(key(dateStr, kana), i + 1);
   }
 
-  const missing = []; // ウラカタにあってシートに無い
-  const ghost   = []; // シートにあってウラカタに無い
+  const missing  = []; // ウラカタにあってシートに無い（新規取りこぼし）
+  const canceled = []; // サイトで明示キャンセル → シート/カレンダー反映
+  const ghost    = []; // シートにあってウラカタ一覧に無い（棚卸し対象）
 
-  // ウラカタ → シート
+  // ウラカタ → シート（新規取りこぼしの追記）
   for (const r of urk) {
     if (r.status === 'キャンセル') continue; // キャンセルは追記しない
     const k = key(r.date, r.name);
@@ -1915,24 +1918,44 @@ function reconcileUrakataReservations_(payload) {
     }
   }
 
-  // シート → ウラカタ（消えている＝キャンセルの可能性）
+  // シート → ウラカタ（キャンセル反映＋幽霊予約棚卸し）
+  const ghostRows = [];
   for (const [k, rowNum] of sheetKeys.entries()) {
-    if (!urkKeys.has(k)) {
-      ghost.push(`${k.replace(/\|/g, ' ')}（シートでは有効だがウラカタ側に見当たらない）`);
+    const siteStatus = urkByKey.get(k);
+    if (siteStatus === 'キャンセル') {
+      // サイトが明示的にキャンセル → シートも自動キャンセル（カレンダー削除込み）
+      cancelSheetRow_(sheet, rowNum, '定期突合：ウラカタ側でキャンセル確認');
+      canceled.push(`${k.replace(/\|/g, ' ')} → シート/カレンダーをキャンセル反映`);
+    } else if (siteStatus === undefined) {
+      // 一覧に一切載っていない → 棚卸し候補
+      ghostRows.push({ k, rowNum });
     }
   }
+  // 幽霊予約の自動キャンセル。読み取り失敗時の誤爆防止のため上限つき。
+  const GHOST_LIMIT = 3;
+  const autoFixGhost = urk.length > 0 && ghostRows.length <= GHOST_LIMIT;
+  ghostRows.forEach(g => {
+    if (autoFixGhost) {
+      cancelSheetRow_(sheet, g.rowNum, '定期突合：ウラカタ一覧に存在せず（キャンセル済みと判断）');
+      ghost.push(`${g.k.replace(/\|/g, ' ')} → シート/カレンダーを自動キャンセル済み`);
+    } else {
+      ghost.push(`${g.k.replace(/\|/g, ' ')}（要確認）`);
+    }
+  });
+  const ghostNote = (!autoFixGhost && ghostRows.length > 0)
+    ? `\n（${GHOST_LIMIT}件超のため自動修正せず通知のみ・読み取り異常の可能性）` : '';
 
   const lines = [];
-  if (missing.length) lines.push(`⚠️ ウラカタ取りこぼし ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
-  if (ghost.length)   lines.push(`⚠️ ウラカタ側に無い予約 ${ghost.length}件（キャンセルの可能性・要確認）\n・` + ghost.join('\n・'));
+  if (missing.length)  lines.push(`⚠️ ウラカタ取りこぼし ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
+  if (canceled.length) lines.push(`🚫 ウラカタでキャンセル ${canceled.length}件（反映済み）\n・` + canceled.join('\n・'));
+  if (ghost.length)    lines.push(`⚠️ ウラカタ一覧に無い予約 ${ghost.length}件${ghostNote}\n・` + ghost.join('\n・'));
 
+  // 変更があった時だけ通知（一致のみは無通知）
   if (lines.length) {
-    postToLine(`📋【ウラカタ定期突合】問題を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
-  } else {
-    postToLine(`✅【ウラカタ定期突合】OK\n今日以降 ${urk.length}件すべてシートと一致しています`);
+    postToLine(`📋【ウラカタ定期突合】更新を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
   }
 
-  const summary = { checked: urk.length, missing: missing.length, ghost: ghost.length };
+  const summary = { checked: urk.length, missing: missing.length, canceled: canceled.length, ghost: ghost.length };
   Logger.log('ウラカタ突合完了: ' + JSON.stringify(summary));
   return summary;
 }
@@ -1983,7 +2006,8 @@ function reconcileAjReservations_(payload) {
     }
   }
 
-  // シート → AJ（消えている＝キャンセルの可能性）
+  // シート → AJ（AJ一覧に無い＝キャンセル済みと判断し、幽霊予約を棚卸し）
+  const ghostRows = [];
   for (let i = 1; i < data.length; i++) {
     const site = String(data[i][COLUMNS.BOOKING_SITE - 1] || '');
     if (siteGroup_(site) !== 'aj') continue;
@@ -1992,17 +2016,30 @@ function reconcileAjReservations_(payload) {
     const dateStr = normalizeSlotDate_(data[i][COLUMNS.DATE - 1]);
     if (!dateStr || dateStr < today) continue;
     const no = String(data[i][COLUMNS.BOOKING_NO - 1] || '').trim();
-    if (no && !byNo.has(no)) ghost.push(`${dateStr} ${no}`);
+    if (no && !byNo.has(no)) ghostRows.push({ no, dateStr, row: i + 1 });
   }
+  // 読み取り失敗時の誤キャンセルを防ぐため、上限を超えたら通知のみに切替
+  const GHOST_LIMIT = 3;
+  const autoFixGhost = list.length > 0 && ghostRows.length <= GHOST_LIMIT;
+  ghostRows.forEach(g => {
+    if (autoFixGhost) {
+      cancelSheetRow_(sheet, g.row, '定期突合：AJ一覧に存在せず（キャンセル済みと判断）');
+      ghost.push(`${g.dateStr} ${g.no} → シート/カレンダーを自動キャンセル済み`);
+    } else {
+      ghost.push(`${g.dateStr} ${g.no}（要確認）`);
+    }
+  });
+  const ghostNote = (!autoFixGhost && ghostRows.length > 0)
+    ? `\n（${GHOST_LIMIT}件超のため自動修正せず通知のみ・読み取り異常の可能性）` : '';
 
   const lines = [];
   if (missing.length)  lines.push(`⚠️ AJ取りこぼし ${missing.length}件（自動追記済み）\n・` + missing.join('\n・'));
   if (promoted.length) lines.push(`✅ AJ確定メール未着 ${promoted.length}件\n・` + promoted.join('\n・'));
-  if (drift.length)    lines.push(`⚠️ AJキャンセルずれ ${drift.length}件\n・` + drift.join('\n・'));
-  if (ghost.length)    lines.push(`⚠️ AJ側に無い予約 ${ghost.length}件（要確認）\n・` + ghost.join('\n・'));
+  if (drift.length)    lines.push(`🚫 AJキャンセル反映 ${drift.length}件\n・` + drift.join('\n・'));
+  if (ghost.length)    lines.push(`⚠️ AJ側に無い予約 ${ghost.length}件${ghostNote}\n・` + ghost.join('\n・'));
 
-  if (lines.length) postToLine(`📋【AJ定期突合】問題を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
-  else              postToLine(`✅【AJ定期突合】OK\n今日以降 ${list.length}件すべて一致`);
+  // 変更があった時だけ通知（一致のみは無通知）
+  if (lines.length) postToLine(`📋【AJ定期突合】更新を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
 
   const summary = { checked: list.length, missing: missing.length, promoted: promoted.length, drift: drift.length, ghost: ghost.length };
   Logger.log('AJ突合完了: ' + JSON.stringify(summary));
@@ -2122,10 +2159,9 @@ function reconcileJalanReservations_(payload) {
   if (drift.length)      lines.push(`⚠️ キャンセルずれ ${drift.length}件\n・` + drift.join('\n・'));
   if (ghostLines.length) lines.push(`⚠️ じゃらん側に無い予約 ${ghostLines.length}件\n・` + ghostLines.join('\n・') + ghostNote);
 
+  // 変更（新規/キャンセル/確定昇格）があった時だけ通知する。一致のみのときは無通知。
   if (lines.length) {
-    postToLine(`📋【じゃらん定期突合】問題を検出しました\n─────────────\n${lines.join('\n─────────────\n')}`);
-  } else {
-    postToLine(`✅【じゃらん定期突合】OK\n今日以降 ${jalanList.length}件すべてシートと一致しています`);
+    postToLine(`📋【じゃらん定期突合】更新を検出\n─────────────\n${lines.join('\n─────────────\n')}`);
   }
 
   const summary = { checked: jalanList.length, missing: missing.length, promoted: promoted.length, drift: drift.length, ghost: ghostLines.length };
@@ -2338,7 +2374,9 @@ function getOrCreateLabel(labelName) {
 // ============================================================
 function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('importReservationEmails').timeBased().everyMinutes(30).create();
+  // ★メール取込は廃止：予約の確定/リクエスト/キャンセルは各サイトの実データ（2時間ごとの
+  //   定期突合＝GitHub ActionsのReconcileワークフロー）を正とする。importReservationEmails は
+  //   手動の過去取込用にのみ残し、定期トリガーには登録しない。
   ScriptApp.newTrigger('registerApprovedToCalendar').timeBased().everyHours(1).create();
   // 運用支援
   ScriptApp.newTrigger('sendDayBeforeReminders').timeBased().atHour(20).everyDays(1).create(); // 毎晩20時
