@@ -25,6 +25,9 @@ const CONFIG = {
   date:     normalizeYmd(process.env.SLOT_DATE),
   time:     normalizeHm(process.env.SLOT_TIME),
   delta:    parseInt(process.env.SLOT_DELTA || '0', 10),
+  // 絶対値同期用：指定があれば before+delta ではなくこの値を目標在庫にする
+  targetStock: (process.env.SLOT_TARGET_STOCK != null && process.env.SLOT_TARGET_STOCK !== '')
+    ? parseInt(process.env.SLOT_TARGET_STOCK, 10) : null,
   dryRun:   process.env.DRY_RUN !== 'false',
   headless: process.env.HEADLESS !== 'false',
   maxAbs:   parseInt(process.env.MAX_ABS_DELTA || '10', 10),
@@ -131,8 +134,10 @@ async function main() {
     log('val_before', { valId, before });
     if (before === null) throw new SlotSyncError(`在庫値(${valId})を読み取れませんでした（対象月/枠を要確認）`);
 
-    const target = Math.max(0, before + CONFIG.delta);
-    log('plan', { before, target });
+    const target = CONFIG.targetStock !== null
+      ? Math.max(0, CONFIG.targetStock)
+      : Math.max(0, before + CONFIG.delta);
+    log('plan', { before, target, mode: CONFIG.targetStock !== null ? 'absolute' : 'delta' });
 
     if (CONFIG.dryRun) {
       result = 'dry_run';

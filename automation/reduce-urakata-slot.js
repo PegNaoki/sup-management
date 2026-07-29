@@ -29,6 +29,9 @@ const CONFIG = {
   date:     normalizeYmd(process.env.SLOT_DATE),
   time:     normalizeHm(process.env.SLOT_TIME),
   delta:    parseInt(process.env.SLOT_DELTA || '0', 10),
+  // 絶対値同期用：指定があれば before+delta ではなくこの値を目標在庫にする
+  targetStock: (process.env.SLOT_TARGET_STOCK != null && process.env.SLOT_TARGET_STOCK !== '')
+    ? parseInt(process.env.SLOT_TARGET_STOCK, 10) : null,
   course:   process.env.COURSE_KEYWORD || 'SUP',
   dryRun:   process.env.DRY_RUN !== 'false',
   headless: process.env.HEADLESS !== 'false',
@@ -116,8 +119,10 @@ async function main() {
       throw new SlotSyncError('即時販売在庫（calendarRealtimeLimit）を読み取れませんでした');
     }
 
-    const target = Math.max(0, before + CONFIG.delta);
-    log('plan', { before, target });
+    const target = CONFIG.targetStock !== null
+      ? Math.max(0, CONFIG.targetStock)
+      : Math.max(0, before + CONFIG.delta);
+    log('plan', { before, target, mode: CONFIG.targetStock !== null ? 'absolute' : 'delta' });
 
     if (CONFIG.dryRun) {
       result = 'dry_run';

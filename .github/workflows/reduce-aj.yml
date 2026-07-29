@@ -9,7 +9,8 @@ on:
     inputs:
       slot_date:  { description: "対象日 (YYYY-MM-DD)", required: true }
       slot_time:  { description: "対象時間 (HH:MM)",    required: true }
-      slot_delta: { description: "増減（-2=減 / +2=戻し）", required: true }
+      slot_delta: { description: "増減（-2=減 / +2=戻し）", required: false }
+      slot_target_stock: { description: "絶対値：目標在庫（指定時はdelta無視）", required: false }
       dry_run:    { description: "true=保存しない",     required: false, default: "true" }
 
 concurrency:
@@ -42,6 +43,7 @@ jobs:
           SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
           SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
           SLOT_DELTA: ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
+          SLOT_TARGET_STOCK: ${{ github.event.client_payload.slot_target_stock || github.event.inputs.slot_target_stock }}
           DRY_RUN:    ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
           HEADLESS:   "true"
         run: node reduce-aj-slot.js
