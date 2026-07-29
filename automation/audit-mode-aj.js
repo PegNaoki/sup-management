@@ -103,7 +103,7 @@ async function main() {
       try {
         const r = await auditOneSlot(page, t);
         results.push({ site: 'aj', date: t.date, time: t.time, ...r });
-        log('slot', { date: t.date, time: t.time, mode: r.mode, raw: r.raw });
+        log('slot', { date: t.date, time: t.time, mode: r.mode, raw: r.raw, remainImmediate: r.remainImmediate });
       } catch (e) {
         results.push({ site: 'aj', date: t.date, time: t.time, mode: 'not_found', raw: null, message: e.message });
         log('slot_skip', { date: t.date, time: t.time, message: e.message });
@@ -140,8 +140,10 @@ async function auditOneSlot(page, task) {
   if (!ids) throw new AuditError(`時間 ${time} の行が見つかりません`);
 
   const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
+  const valId = `${ids.plan}_${ids.course}_${compact}_val`;
   const raw = await readStatus(page, statusId);
-  return { mode: statusToMode(raw), raw, plan: ids.plan, course: ids.course };
+  const remainImmediate = await readVal(page, valId); // 在庫（残り即予約可能数）
+  return { mode: statusToMode(raw), raw, remainImmediate, plan: ids.plan, course: ids.course };
 }
 
 // ---- 以下 mode-aj-slot.js から流用（ナビゲーション・読み取り） ----
@@ -195,6 +197,14 @@ async function ensureMonthShown(page, compact) {
 
 async function readStatus(page, statusId) {
   const v = await page.locator(`input[id="${statusId}"]`).inputValue().catch(() => null);
+  if (v === null || v === '') return null;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+// hidden input の在庫値（残り即予約可能数）を読む
+async function readVal(page, valId) {
+  const v = await page.locator(`input[id="${valId}"]`).inputValue().catch(() => null);
   if (v === null || v === '') return null;
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? null : n;

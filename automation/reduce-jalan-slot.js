@@ -36,6 +36,9 @@ const CONFIG = {
   time:      normalizeHm(process.env.SLOT_TIME),
   // SLOT_DELTA（符号付き）優先。無ければ従来の SLOT_DECREMENT を減算(-)として扱う。
   delta:     parseInt(process.env.SLOT_DELTA || `-${process.env.SLOT_DECREMENT || '0'}`, 10),
+  // 絶対値同期用：指定があれば before+delta ではなくこの値を目標残数にする
+  targetStock: (process.env.SLOT_TARGET_STOCK != null && process.env.SLOT_TARGET_STOCK !== '')
+    ? parseInt(process.env.SLOT_TARGET_STOCK, 10) : null,
   dryRun:    process.env.DRY_RUN !== 'false',
   headless:  process.env.HEADLESS !== 'false',
   maxDec:    parseInt(process.env.MAX_DECREMENT || '10', 10),
@@ -153,10 +156,14 @@ async function main() {
       throw new SlotSyncError(`対象枠の残数を読み取れませんでした（受付制限/在庫操作対象外、またはセレクタ要確認）`);
     }
 
-    const steps = Math.abs(CONFIG.delta);
-    const dir   = CONFIG.delta < 0 ? 'minus' : 'plus';
-    const target = Math.max(0, before + CONFIG.delta);
-    log('plan', { before, target, dir });
+    // 絶対値指定があれば「目標残数 − 現在値」を実効デルタにする（ステッパー往復で吸収）
+    const effDelta = CONFIG.targetStock !== null
+      ? (Math.max(0, CONFIG.targetStock) - before)
+      : CONFIG.delta;
+    const steps = Math.abs(effDelta);
+    const dir   = effDelta < 0 ? 'minus' : 'plus';
+    const target = Math.max(0, before + effDelta);
+    log('plan', { before, target, dir, mode: CONFIG.targetStock !== null ? 'absolute' : 'delta' });
 
     if (CONFIG.dryRun) {
       result = 'dry_run';

@@ -119,6 +119,19 @@ jobs:
             jq -e '.ok == true' response-aj.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
           fi
 
+      # 在庫同期プラン（ライブ予約=確定のみでB算出、定員マスターCSVでC）。
+      # 既定は DRY_RUN=true で無操作のプラン表を出すだけ（危険枠の可視化）。
+      - name: Overbooking sync plan (dry-run)
+        if: always()
+        continue-on-error: true   # プラン算出の失敗でReconcile本体を落とさない（誤アラート防止）
+        working-directory: automation
+        env:
+          CAPACITY_CSV_URL: ${{ secrets.CAPACITY_CSV_URL }}
+          DRY_RUN: "true"
+        run: |
+          if [ -z "$CAPACITY_CSV_URL" ]; then echo "CAPACITY_CSV_URL 未設定のためスキップ"; exit 0; fi
+          node sync-overbooking.js
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v5
@@ -128,6 +141,8 @@ jobs:
             automation/jalan-reservations.json
             automation/urakata-reservations.json
             automation/aj-reservations.json
+            automation/sync-overbooking-plan.json
+            automation/sync-overbooking-plan.md
             automation/reconcile-error.png
             automation/reconcile-urakata-error.png
             automation/reconcile-aj-error.png
