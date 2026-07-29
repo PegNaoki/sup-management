@@ -210,20 +210,21 @@ async function fetchAuthCode(sinceMs) {
   return '';
 }
 
-// 各行の最後のセルのアイコンで状態を判定（詳細は展開しない＝ヘッドレスで安定）。
-// 実データで確認した対応：
-//   マイナス棒 #808080（path "M29 14…"）＝キャンセル/却下
-//   丸アイコン（緑 #21BA45 / 灰 #DCDCDC）＝いずれも「確定」
-//   ※この台帳には即時予約の確定とキャンセルのみが並ぶ。灰＝仮予約 ではない。
+// 各行の最後のセルのアイコンSVGで状態を判定（詳細は展開しない＝ヘッドレスで安定）。
+// 実データ（仮予約の実例含む）で確認した対応：
+//   マイナス棒  path "M29 14…" / fill #808080          ＝ キャンセル/却下
+//   オレンジR   fill #FF9500（リクエストの「R」グリフ）＝ 仮予約(リクエスト・未承認)
+//   丸＋チェック fill 緑#21BA45 または 灰#DCDCDC        ＝ 確定
 async function readStatuses(page, expectedCount) {
   const statuses = await page.$$eval('table.ui.celled tbody tr', (trs) => trs.map((tr) => {
-    const tds  = tr.querySelectorAll('td');
-    const last = tds[tds.length - 1];
-    const path = last ? last.querySelector('svg path') : null;
-    const fill = ((path && path.getAttribute('fill')) || '').toUpperCase();
-    const d    = (path && path.getAttribute('d')) || '';
-    if (d.includes('M29 14') || fill.includes('808080')) return 'キャンセル';
-    return '確定';
+    const tds   = tr.querySelectorAll('td');
+    const last  = tds[tds.length - 1];
+    const paths = last ? Array.from(last.querySelectorAll('svg path')) : [];
+    const fills = paths.map((p) => (p.getAttribute('fill') || '').toUpperCase());
+    const ds    = paths.map((p) => p.getAttribute('d') || '');
+    if (ds.some((d) => d.includes('M29 14')) || fills.includes('#808080')) return 'キャンセル';
+    if (fills.includes('#FF9500')) return '仮予約';   // オレンジのリクエスト(R)マーク
+    return '確定';                                     // 緑/灰の丸＋チェック
   })).catch(() => []);
   log('statuses_read', { count: statuses.length, expected: expectedCount, sample: statuses.slice(0, 8) });
   if (statuses.length !== expectedCount) log('statuses_count_mismatch', { got: statuses.length, expected: expectedCount });
