@@ -104,7 +104,7 @@ async function main() {
     // ---------- 4a. 診断：一覧行のDOMをダンプ（状態ラベルの場所を特定するため） ----------
     if (process.env.DUMP_ROW === 'true') {
       const rowDiag = await page.$$eval('table.ui.celled tbody tr', trs =>
-        trs.slice(0, 3).map(tr => tr.outerHTML.replace(/\s+/g, ' ').slice(0, 1600)));
+        trs.slice(0, 20).map(tr => tr.outerHTML.replace(/\s+/g, ' ').slice(0, 2200)));
       rowDiag.forEach((h, i) => log('row_html_dump', { i, html: h }));
     }
 
