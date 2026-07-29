@@ -1,0 +1,12 @@
+{
+  "name": "sup-slot-automation",
+  "version": "1.0.0",
+  "description": "予約が入ったらOTA(じゃらん/ACTIVITY BOARD)の在庫枠を自動で減らす",
+  "type": "module",
+  "scripts": {
+    "reduce:jalan": "node reduce-jalan-slot.js"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}

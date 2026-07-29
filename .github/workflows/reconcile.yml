@@ -1,0 +1,152 @@
+name: Reconcile OTA Reservations
+
+# 2時間ごとに じゃらん / ウラカタ / アクティビティジャパン の予約一覧を実データで読み取り、
+# GAS(スプレッドシート)と突合する。各サイトの状況を「正」として扱う一本化運用。
+# ・シートに無い予約 → 取りこぼしとして自動追記（新規はGAS側で1回だけLINE通知）
+# ・サイトでキャンセル/一覧から消滅 → シートをキャンセル＋カレンダー削除（幽霊予約棚卸し）
+# ・一致のみ（変更なし）のときは通知しない
+on:
+  schedule:
+    - cron: "0 */2 * * *"   # 2時間ごと（UTC。JSTでも2時間間隔で回る）
+  workflow_dispatch: {}
+
+concurrency:
+  group: ota-sync          # 在庫減算と同時にじゃらんへログインしない
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: automation
+        run: npm install
+
+      - name: Install Chromium
+        working-directory: automation
+        run: npx playwright install --with-deps chromium
+
+      - name: Read reservations from jalan
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          HEADLESS:       "true"
+        run: node reconcile-jalan.js
+
+      - name: Post to GAS for reconciliation
+        working-directory: automation
+        env:
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: |
+          if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
+            echo "GAS_RECONCILE_URL / RECONCILE_TOKEN が未設定のため送信スキップ"; exit 1
+          fi
+          jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' jalan-reservations.json > payload.json
+          # GASは処理後302リダイレクトで応答を返す。curlのPOST→GET変換で応答本文が
+          # 取れないことがあるため、判定は「POSTが2xx/3xxで届いたか」を主とし、
+          # 本文がJSONで ok:false のときだけ明示的に失敗にする。
+          HTTP_CODE=$(curl -sS -o response.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
+            -H "Content-Type: application/json" \
+            -d @payload.json)
+          echo "HTTP: $HTTP_CODE"
+          head -c 500 response.txt; echo
+          if [ "$HTTP_CODE" -ge 400 ]; then echo "GASへの送信失敗"; exit 1; fi
+          if jq -e . response.txt > /dev/null 2>&1; then
+            jq -e '.ok == true' response.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
+          else
+            echo "応答はリダイレクトページ（GAS側の実行結果はLINE通知で確認）"
+          fi
+
+      - name: Read reservations from urakata
+        working-directory: automation
+        env:
+          URKT_ID:       ${{ secrets.URKT_ID }}
+          URKT_PASSWORD: ${{ secrets.URKT_PASSWORD }}
+          HEADLESS:      "true"
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: node reconcile-urakata.js
+
+      - name: Post urakata to GAS for reconciliation
+        working-directory: automation
+        env:
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: |
+          if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
+            echo "GAS未設定のため送信スキップ"; exit 1
+          fi
+          jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' urakata-reservations.json > payload-urk.json
+          HTTP_CODE=$(curl -sS -o response-urk.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
+            -H "Content-Type: application/json" -d @payload-urk.json)
+          echo "HTTP: $HTTP_CODE"; head -c 500 response-urk.txt; echo
+          if [ "$HTTP_CODE" -ge 400 ]; then echo "GASへの送信失敗"; exit 1; fi
+          if jq -e . response-urk.txt > /dev/null 2>&1; then
+            jq -e '.ok == true' response-urk.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
+          fi
+
+      - name: Read reservations from activity japan
+        working-directory: automation
+        env:
+          AJ_ID:       ${{ secrets.AJ_ID }}
+          AJ_PASSWORD: ${{ secrets.AJ_PASSWORD }}
+          HEADLESS:    "true"
+        run: node reconcile-aj.js
+
+      - name: Post AJ to GAS for reconciliation
+        working-directory: automation
+        env:
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: |
+          if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
+            echo "GAS未設定のため送信スキップ"; exit 1
+          fi
+          jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' aj-reservations.json > payload-aj.json
+          HTTP_CODE=$(curl -sS -o response-aj.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
+            -H "Content-Type: application/json" -d @payload-aj.json)
+          echo "HTTP: $HTTP_CODE"; head -c 500 response-aj.txt; echo
+          if [ "$HTTP_CODE" -ge 400 ]; then echo "GASへの送信失敗"; exit 1; fi
+          if jq -e . response-aj.txt > /dev/null 2>&1; then
+            jq -e '.ok == true' response-aj.txt > /dev/null || { echo "GAS側でエラー"; exit 1; }
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: reconcile-${{ github.run_id }}
+          path: |
+            automation/jalan-reservations.json
+            automation/urakata-reservations.json
+            automation/aj-reservations.json
+            automation/reconcile-error.png
+            automation/reconcile-urakata-error.png
+            automation/reconcile-aj-error.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Notify failure to LINE
+        if: failure()
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_USER:  ${{ secrets.LINE_USER_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
+            echo "LINE未設定のため通知スキップ"; exit 0
+          fi
+          TEXT="⚠️【定期突合 失敗】じゃらん予約一覧の読み取りまたは突合に失敗しました\nログ: ${RUN_URL}"
+          PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
+          curl -sS -X POST https://api.line.me/v2/bot/message/push \
+            -H "Authorization: Bearer $LINE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"

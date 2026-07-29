@@ -1,0 +1,70 @@
+name: Recount (read sites for a date range)
+
+# 過去期間を含めて各OTAの予約一覧を実データで読み取り、ログに出力するだけ。
+# シート/カレンダーは変更しない（GASへPOSTしない）。集計・棚卸しの確認用。
+on:
+  workflow_dispatch:
+    inputs:
+      recon_from: { description: "参加日 from (YYYY-MM-DD)", required: true }
+      recon_to:   { description: "参加日 to (YYYY-MM-DD)",   required: true }
+
+jobs:
+  recount:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        working-directory: automation
+        run: npm install
+      - name: Install Chromium
+        working-directory: automation
+        run: npx playwright install --with-deps chromium
+
+      - name: Read jalan
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          HEADLESS:       "true"
+          RECON_FROM:     ${{ github.event.inputs.recon_from }}
+          RECON_TO:       ${{ github.event.inputs.recon_to }}
+          DUMP_FORM:      "true"
+        run: node reconcile-jalan.js || true
+
+      - name: Read urakata
+        working-directory: automation
+        env:
+          URKT_ID:        ${{ secrets.URKT_ID }}
+          URKT_PASSWORD:  ${{ secrets.URKT_PASSWORD }}
+          HEADLESS:       "true"
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+          RECON_FROM:     ${{ github.event.inputs.recon_from }}
+          RECON_TO:       ${{ github.event.inputs.recon_to }}
+          DUMP_ROW:       "true"
+        run: node reconcile-urakata.js || true
+
+      - name: Read activity japan
+        working-directory: automation
+        env:
+          AJ_ID:       ${{ secrets.AJ_ID }}
+          AJ_PASSWORD: ${{ secrets.AJ_PASSWORD }}
+          HEADLESS:    "true"
+          RECON_FROM:  ${{ github.event.inputs.recon_from }}
+          RECON_TO:    ${{ github.event.inputs.recon_to }}
+          DUMP_FORM:   "true"
+        run: node reconcile-aj.js || true
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: recount-${{ github.run_id }}
+          path: |
+            automation/jalan-reservations.json
+            automation/urakata-reservations.json
+            automation/aj-reservations.json
+          if-no-files-found: ignore
