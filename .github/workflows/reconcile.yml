@@ -123,6 +123,7 @@ jobs:
       # 既定は DRY_RUN=true で無操作のプラン表を出すだけ（危険枠の可視化）。
       - name: Overbooking sync plan (dry-run)
         if: always()
+        continue-on-error: true   # プラン算出の失敗でReconcile本体を落とさない（誤アラート防止）
         working-directory: automation
         env:
           CAPACITY_CSV_URL: ${{ secrets.CAPACITY_CSV_URL }}
