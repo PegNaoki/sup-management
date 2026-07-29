@@ -752,6 +752,10 @@ function sendDayBeforeReminders() {
   const target = offsetYmd_(1); // 明日
   const mode   = PropertiesService.getScriptProperties().getProperty('CUSTOMER_MAIL_MODE') || 'test';
   const testTo = PropertiesService.getScriptProperties().getProperty('REMINDER_TEST_EMAIL') || Session.getActiveUser().getEmail();
+  // 本番送信時の控え（BCC）。REMINDER_BCC 未設定ならプレビュー宛先（=自分）に控えを送る。
+  // 空文字を明示設定すればBCCなしにできる。
+  const bccProp = PropertiesService.getScriptProperties().getProperty('REMINDER_BCC');
+  const bccTo   = (bccProp !== null ? bccProp : testTo);
 
   const bySlot = {}; // time -> [{name,people,phone,mailState}]
   const unsent = []; // メール未送信（アドレス無し等）
@@ -774,7 +778,9 @@ function sendDayBeforeReminders() {
       try {
         const { subject, body } = buildCustomerReminderMail_(row);
         if (mode === 'live') {
-          MailApp.sendEmail({ to: email, subject, body, name: MEETING_INFO.senderName });
+          const opts = { to: email, subject, body, name: MEETING_INFO.senderName };
+          if (bccTo) opts.bcc = bccTo; // 送信控えを自分（or REMINDER_BCC）にも
+          MailApp.sendEmail(opts);
         } else {
           MailApp.sendEmail({ to: testTo, subject: `[TEST→${email}] ${subject}`,
             body: `※テスト送信（本番の宛先: ${email}）\n\n${body}`, name: MEETING_INFO.senderName });
