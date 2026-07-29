@@ -210,23 +210,45 @@ async function fetchAuthCode(sinceMs) {
   return '';
 }
 
-// 全予約行の詳細を展開して [data-test="statusText"] からステータスを読む。
-// 一覧の DOM 順と statusText の DOM 順が一致する前提で index 対応させる。
+// 各予約行を1行ずつ展開し、本当のステータス文字列 [data-test="statusText"] を読む。
+// アイコン色（灰=DCDCDC）は「確定でも灰」になるため状態判定には使わない（キャンセルの
+// マイナス棒 #808080 だけはフォールバックの保険として残す）。
 async function readStatuses(page, expectedCount) {
-  // 各行の最後のセルのSVGアイコンの色で状態を判定（詳細を開かない＝ヘッドレスで安定）。
-  //   緑 #21BA45（丸＋チェック）＝確定 / 灰 #DCDCDC（丸＋チェック）＝リクエスト(未確定)
-  //   灰マイナス棒 #808080（path "M29 14…"）＝キャンセル/却下
-  const statuses = await page.$$eval('table.ui.celled tbody tr', (trs) => trs.map((tr) => {
-    const tds = tr.querySelectorAll('td');
-    const last = tds[tds.length - 1];
-    const path = last ? last.querySelector('svg path') : null;
-    const fill = ((path && path.getAttribute('fill')) || '').toUpperCase();
-    const d    = (path && path.getAttribute('d')) || '';
-    if (fill.includes('21BA45')) return '確定';
-    if (d.includes('M29 14') || fill.includes('808080')) return 'キャンセル';
-    if (fill.includes('DCDCDC')) return '仮予約';
-    return '確定';
-  })).catch(() => []);
+  const rowSel = 'table.ui.celled tbody tr';
+  const n = await page.$$eval(rowSel, (trs) => trs.length).catch(() => 0);
+  const statuses = [];
+  for (let i = 0; i < n; i++) {
+    let statusText = '';
+    let iconFill = '';
+    try {
+      const row = page.locator(rowSel).nth(i);
+      // 診断・保険用にアイコン色も拾う
+      iconFill = (await row.locator('svg path').first().getAttribute('fill').catch(() => '')) || '';
+      // 行のキャレット（▶）をクリックして詳細を展開（アコーディオン：他行は自動で閉じる想定）
+      const caret = row.locator('i.caret').first();
+      if (await caret.count()) {
+        await caret.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(400);
+        // 展開中（表示されている）の statusText を1つ読む
+        statusText = await page.$$eval('[data-test="statusText"]', (els) => {
+          const vis = els.filter((e) => e.offsetParent !== null);
+          const el = vis[vis.length - 1] || els[els.length - 1];
+          return el ? el.textContent : '';
+        }).catch(() => '');
+      }
+    } catch (e) { /* 読めなければ下でフォールバック */ }
+
+    let st;
+    if (String(statusText).trim()) {
+      st = mapUrakataStatus(statusText);                 // 本命：本当の文字列で判定
+    } else if (iconFill.toUpperCase().includes('808080')) {
+      st = 'キャンセル';                                  // 保険：マイナス棒＝キャンセル
+    } else {
+      st = '確定';                                        // 文字列が取れないときは確定扱い
+    }
+    log('status_row', { i, statusText: String(statusText).replace(/\s+/g, '').slice(0, 24), icon: iconFill, mapped: st });
+    statuses.push(st);
+  }
   log('statuses_read', { count: statuses.length, expected: expectedCount, sample: statuses.slice(0, 8) });
   if (statuses.length !== expectedCount) log('statuses_count_mismatch', { got: statuses.length, expected: expectedCount });
   return statuses;
