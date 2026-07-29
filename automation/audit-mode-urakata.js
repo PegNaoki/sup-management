@@ -94,9 +94,14 @@ async function main() {
 
     for (const t of targets) {
       try {
-        const raw = await auditOneSlot(page, t);
-        results.push({ site: 'urakata', date: t.date, time: t.time, mode: limitToMode(raw), raw });
-        log('slot', { date: t.date, time: t.time, mode: limitToMode(raw), raw });
+        const r = await auditOneSlot(page, t);
+        const row = {
+          site: 'urakata', date: t.date, time: t.time,
+          mode: limitToMode(r.limit), raw: r.limit,
+          remainImmediate: r.limit, booked: r.booked, capacity: r.capacity,
+        };
+        results.push(row);
+        log('slot', row);
       } catch (e) {
         results.push({ site: 'urakata', date: t.date, time: t.time, mode: 'not_found', raw: null, message: e.message });
         log('slot_skip', { date: t.date, time: t.time, message: e.message });
@@ -123,7 +128,10 @@ async function auditOneSlot(page, task) {
   await jumpToDate(page, date);
   const found = await locateCell(page, date, time);
   if (!found.ok) throw new AuditError(`対象枠が見つかりません: ${found.reason}`);
-  return await readLimit(page.locator('[data-urkt-target="1"]'));
+  const cell = page.locator('[data-urkt-target="1"]');
+  const limit = await readLimit(cell);   // 残り即予約可能数（即時販売在庫 ( n )）
+  const seat = await readSeat(cell);      // { booked, capacity }（予約数/定員）
+  return { limit, booked: seat.booked, capacity: seat.capacity };
 }
 
 // ---- 以下 mode-urakata-slot.js から流用（ナビゲーション・読み取り・ログイン） ----
@@ -188,6 +196,15 @@ async function readLimit(cell) {
   if (txt === null) return null;
   const n = parseInt(txt.replace(/[^\d]/g, ''), 10);
   return Number.isNaN(n) ? null : n;
+}
+
+// セル内の "予約数/定員"（例 "3/20"）を読む
+async function readSeat(cell) {
+  const txt = await cell.locator('[data-test=calendarSeatCount]').first().innerText().catch(() => null);
+  if (txt === null) return { booked: null, capacity: null };
+  const m = txt.replace(/\s/g, '').match(/(\d+)\s*\/\s*(\d+)/);
+  if (!m) return { booked: null, capacity: null };
+  return { booked: parseInt(m[1], 10), capacity: parseInt(m[2], 10) };
 }
 
 async function urakataLogin(page, url, id, password, landingName) {

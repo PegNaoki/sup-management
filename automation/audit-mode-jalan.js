@@ -108,8 +108,9 @@ async function main() {
       try {
         const cell = await getCell(mng, t.date, t.time);
         const mode = await readCellMode(cell);
-        results.push({ site: 'jalan', date: t.date, time: t.time, mode: mode || 'unknown', raw: mode });
-        log('slot', { date: t.date, time: t.time, mode });
+        const remainImmediate = await readStock(cell); // 残数
+        results.push({ site: 'jalan', date: t.date, time: t.time, mode: mode || 'unknown', raw: mode, remainImmediate });
+        log('slot', { date: t.date, time: t.time, mode, remainImmediate });
       } catch (e) {
         results.push({ site: 'jalan', date: t.date, time: t.time, mode: 'not_found', raw: null, message: e.message });
         log('slot_skip', { date: t.date, time: t.time, message: e.message });
@@ -152,6 +153,14 @@ async function readCellMode(cell) {
   if (s.includes('confirmed'))    return 'immediate';
   if (s.includes('nosale') || s.includes('none')) return 'closed';
   return null;
+}
+
+// セルの残数 .stock-cnt を読む
+async function readStock(cell) {
+  const txt = await cell.locator('.stock-cnt').first().innerText().catch(() => null);
+  if (txt === null) return null;
+  const n = parseInt(txt.replace(/[^\d]/g, ''), 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 const DATE_HEADER_SELECTOR = process.env.DATE_HEADER_SELECTOR || 'span.day';
