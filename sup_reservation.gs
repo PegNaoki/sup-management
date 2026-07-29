@@ -1859,6 +1859,8 @@ function doPost(e) {
   try {
     // payload.site で突合先を判定（既定はじゃらん・後方互換）
     const site = String(payload.site || 'じゃらん');
+    // 棚卸し(auditGhostRows)用に、直近のサイト予約リストを保存しておく。
+    storeLastSiteReservations_(site, payload.reservations || []);
     let result;
     if (site.includes('ウラカタ'))            result = reconcileUrakataReservations_(payload);
     else if (site.includes('アクティビティ')) result = reconcileAjReservations_(payload);
@@ -2181,6 +2183,106 @@ function reconcileJalanReservations_(payload) {
   const summary = { checked: jalanList.length, missing: missing.length, promoted: promoted.length, drift: drift.length, ghost: ghostLines.length };
   Logger.log('突合完了: ' + JSON.stringify(summary));
   return summary;
+}
+
+// ============================================================
+// 幽霊予約 棚卸し（過去に溜まったキャンセル漏れ・重複行の一括掃除）
+// ------------------------------------------------------------
+// 使い方（GASエディタで順に実行）：
+//   1) 定期突合(Reconcile)を1回走らせる → 各サイトの最新予約リストが保存される
+//   2) auditGhostRows()    … 消さずに「サイトの有効予約に一致しない今日以降の行」を一覧表示
+//   3) 内容を確認して問題なければ applyGhostCleanup() … 一覧の行を一括キャンセル（カレンダー削除込み）
+// 安全策：あるサイトの保存データが空のときはそのサイトの行は対象にしない（誤爆防止）。
+// ============================================================
+
+// 突合時に受け取ったサイト予約リストを保存（棚卸しの照合元）。容量節約のため必要項目だけ。
+function storeLastSiteReservations_(site, reservations) {
+  try {
+    const g = siteGroup_(site) ||
+      (String(site).includes('アクティビティ') ? 'aj' : String(site).includes('じゃらん') ? 'jalan' : 'urakata');
+    const slim = (reservations || []).map(r => ({
+      bookingNo: r.bookingNo || '', name: r.name || '',
+      date: String(r.date || '').replace(/\//g, '-'), status: r.status || '',
+    }));
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty('LAST_RES_' + g, JSON.stringify(slim));
+    props.setProperty('LAST_RES_' + g + '_AT', new Date().toISOString());
+  } catch (e) {
+    Logger.log('サイト予約リスト保存に失敗: ' + e.message);
+  }
+}
+
+function auditGhostRows()   { return ghostAudit_(false); }
+function applyGhostCleanup() { return ghostAudit_(true); }
+
+function ghostAudit_(apply) {
+  const props = PropertiesService.getScriptProperties();
+  const ss    = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss);
+  const data  = sheet.getDataRange().getValues();
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const norm  = (s) => String(s || '').replace(/[\s　]/g, '');
+
+  // 各グループの「有効(キャンセル/却下でない)予約」キー集合を保存データから作る
+  const groups = ['jalan', 'aj', 'urakata'];
+  const activeSets = {}, at = {}, counts = {};
+  groups.forEach(g => {
+    let list = [];
+    try { list = JSON.parse(props.getProperty('LAST_RES_' + g) || '[]'); } catch (e) { list = []; }
+    at[g] = props.getProperty('LAST_RES_' + g + '_AT') || '(未取得)';
+    counts[g] = list.length;
+    const byNo = new Set(), byDateName = new Set();
+    list.forEach(r => {
+      if (r.status === 'キャンセル' || r.status === '却下') return;
+      const d = String(r.date || '').replace(/\//g, '-');
+      if (r.bookingNo) byNo.add(String(r.bookingNo).trim());
+      byDateName.add(`${d}|${norm(r.name)}`);
+    });
+    activeSets[g] = { byNo, byDateName };
+  });
+
+  const candidates = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const status = String(row[COLUMNS.STATUS - 1] || '');
+    if (['キャンセル', '却下'].includes(status)) continue;
+    const g = siteGroup_(row[COLUMNS.BOOKING_SITE - 1]);
+    if (!g) continue;                       // 直接予約(LINE/インスタ等)は対象外
+    if (counts[g] === 0) continue;          // そのサイトの保存データが無い→安全のためスキップ
+    const dateStr = normalizeSlotDate_(row[COLUMNS.DATE - 1]);
+    if (!dateStr || dateStr < today) continue; // 今日以降のみ
+    const no = String(row[COLUMNS.BOOKING_NO - 1] || '').trim();
+    const dn = `${dateStr}|${norm(row[COLUMNS.KANA - 1] || row[COLUMNS.NAME - 1])}`;
+    const set = activeSets[g];
+    const matched = g === 'urakata'
+      ? set.byDateName.has(dn)
+      : ((no && set.byNo.has(no)) || set.byDateName.has(dn));
+    if (!matched) {
+      candidates.push({
+        row: i + 1, g, date: dateStr,
+        time: normalizeSlotTime_(row[COLUMNS.TIME - 1]),
+        name: row[COLUMNS.NAME - 1] || row[COLUMNS.KANA - 1] || '',
+        people: row[COLUMNS.PEOPLE - 1] || '', no,
+      });
+    }
+  }
+
+  Logger.log(`【幽霊予約 棚卸し ${apply ? '適用' : 'ドライラン'}】`);
+  Logger.log(`保存済みサイトデータ件数: jalan=${counts.jalan}(${at.jalan}) / aj=${counts.aj}(${at.aj}) / urakata=${counts.urakata}(${at.urakata})`);
+  if (counts.jalan === 0 && counts.aj === 0 && counts.urakata === 0) {
+    Logger.log('⚠️ 保存データがありません。先に定期突合(Reconcile)を1回実行してから再度お試しください。');
+    return { candidates: 0, needReconcile: true };
+  }
+  Logger.log(`掃除候補（サイトの有効予約に一致しない・今日以降の行）: ${candidates.length}件`);
+  candidates.forEach(c => Logger.log(`  行${c.row} [${c.g}] ${c.date} ${c.time} ${c.name} ${c.people}名 ${c.no}`));
+
+  if (apply) {
+    candidates.forEach(c => cancelSheetRow_(sheet, c.row, '棚卸し：サイトの有効予約に存在せず（キャンセル/幽霊と判断）'));
+    Logger.log(`→ ${candidates.length}件をキャンセル反映（カレンダー削除込み）しました`);
+  } else {
+    Logger.log('※まだ消していません。内容を確認して問題なければ applyGhostCleanup() を実行してください。');
+  }
+  return { candidates: candidates.length };
 }
 
 // 突合による自動キャンセル：ステータス変更＋カレンダーイベント削除＋対応メモ記録
