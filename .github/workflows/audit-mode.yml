@@ -1,0 +1,113 @@
+name: Audit OTA Slot Modes
+
+# 各OTA（じゃらん / ウラカタ / アクティビティジャパン）の枠が現在
+# 「即予約 / リクエスト」のどちらに設定されているかを読み取り専用で監査し、
+# 1枚の一覧表にまとめる。予約データではなく「枠の予約方式設定」を確認するためのもの。
+# 変更は一切行わない（切替UIには触れない）。手動実行専用。
+on:
+  workflow_dispatch:
+    inputs:
+      slots:
+        description: '監査対象の枠（JSON配列）。空なら既定の今後枠を使用'
+        required: false
+        default: ''
+
+concurrency:
+  group: ota-sync          # 在庫減算/突合と同時にログインしない
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      # 既定の監査対象枠（inputs.slots が空のとき使用）
+      DEFAULT_SLOTS: >-
+        [{"date":"2026-07-30","time":"10:00"},
+         {"date":"2026-08-03","time":"10:00"},
+         {"date":"2026-08-08","time":"10:00"},
+         {"date":"2026-08-09","time":"13:30"},
+         {"date":"2026-08-11","time":"13:30"},
+         {"date":"2026-08-14","time":"10:00"},
+         {"date":"2026-08-14","time":"13:30"},
+         {"date":"2026-08-16","time":"10:00"},
+         {"date":"2026-08-22","time":"13:30"},
+         {"date":"2026-09-20","time":"10:00"}]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: automation
+        run: npm install
+
+      - name: Install Chromium
+        working-directory: automation
+        run: npx playwright install --with-deps chromium
+
+      - name: Resolve SLOTS
+        id: slots
+        run: |
+          if [ -n "${{ inputs.slots }}" ]; then
+            echo "value<<EOF" >> "$GITHUB_OUTPUT"
+            echo '${{ inputs.slots }}' >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            # 改行を潰して1行のJSONにする
+            COMPACT=$(printf '%s' "$DEFAULT_SLOTS" | tr -d '\n' | tr -s ' ')
+            echo "value=$COMPACT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Audit jalan
+        continue-on-error: true
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          HEADLESS:       "true"
+          SLOTS:          ${{ steps.slots.outputs.value }}
+        run: node audit-mode-jalan.js
+
+      - name: Audit urakata
+        continue-on-error: true
+        working-directory: automation
+        env:
+          URKT_ID:           ${{ secrets.URKT_ID }}
+          URKT_PASSWORD:     ${{ secrets.URKT_PASSWORD }}
+          HEADLESS:          "true"
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+          SLOTS:             ${{ steps.slots.outputs.value }}
+        run: node audit-mode-urakata.js
+
+      - name: Audit activity japan
+        continue-on-error: true
+        working-directory: automation
+        env:
+          AJ_ID:       ${{ secrets.AJ_ID }}
+          AJ_PASSWORD: ${{ secrets.AJ_PASSWORD }}
+          HEADLESS:    "true"
+          SLOTS:       ${{ steps.slots.outputs.value }}
+        run: node audit-mode-aj.js
+
+      - name: Combine into one table
+        working-directory: automation
+        run: node combine-mode-audit.js
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: audit-mode-${{ github.run_id }}
+          path: |
+            automation/audit-jalan-mode.json
+            automation/audit-urakata-mode.json
+            automation/audit-aj-mode.json
+            automation/audit-mode-summary.json
+            automation/audit-mode-summary.md
+            automation/audit-*-mode.png
+            automation/audit-*-mode-error.png
+          if-no-files-found: ignore
+          retention-days: 14
