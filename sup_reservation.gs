@@ -1493,8 +1493,16 @@ function syncSlotModes() {
     const weekend = isWeekendBase_(date, holidaySet);
 
     if (force === 'closed') {
-      // 受付停止：切替アダプタ未対応のため通知せずログのみ
-      results.push({ date, time, cap, booked: bookedN, weekend, remaining: 0, perSite: 'closed(手動)' });
+      // ✗ = 即予約オーバーブッキング防止のため全サイトを「リクエスト」化する。
+      // （完全な受付停止ではなく、即時確定を止めて承認制にする。日程変更依頼等も可能）
+      const perSite = {};
+      Object.keys(MODE_SITES).forEach(site => {
+        perSite[site] = 'request';
+        const skey = `${site}|${key}`;
+        if (state[skey] === 'request') return; // 前回もrequestなら送らない
+        changesBySite[site].push({ date, time, mode: 'request', stock: 0, skey });
+      });
+      results.push({ date, time, cap, booked: bookedN, weekend, remaining: 0, perSite });
       return;
     }
     if (force !== 'request' && force !== 'immediate' && cap === null) return; // 定員未設定・強制なしはスキップ
