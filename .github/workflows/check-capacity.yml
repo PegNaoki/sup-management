@@ -1,0 +1,23 @@
+name: Check Capacity Master
+
+# 定員マスター(CSV公開)を読み、実際に入力された定員(既定以外)だけを一覧表示する。
+# スクレイプなしの軽量チェック（シート編集の反映確認用・数十秒）。読み取り専用。
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Show entered capacities
+        working-directory: automation
+        env:
+          CAPACITY_CSV_URL: ${{ secrets.CAPACITY_CSV_URL }}
+          CAPACITY_ONLY: "true"
+        run: |
+          if [ -z "$CAPACITY_CSV_URL" ]; then echo "CAPACITY_CSV_URL 未設定"; exit 1; fi
+          node sync-overbooking.js

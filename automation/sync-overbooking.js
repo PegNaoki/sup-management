@@ -144,11 +144,11 @@ async function loadCapacity() {
     const def = Number(String(row[1]).replace(/[^\d.-]/g, '')) || 0; // B列＝既定
     for (const dc of dateCols) {
       const cell = String(row[dc.col] == null ? '' : row[dc.col]).trim();
-      let override = '', capacity = def;
-      if (cell === '△' || cell === '▲') override = 'request';
-      else if (/^[x×✕✖XＸ]$/.test(cell)) { override = 'stop'; capacity = 0; }
-      else if (cell !== '' && !isNaN(Number(cell))) capacity = Number(cell);
-      out.push({ date: dc.date, time, capacity, override });
+      let override = '', capacity = def, explicit = false;
+      if (cell === '△' || cell === '▲') { override = 'request'; explicit = true; }
+      else if (/^[x×✕✖XＸ]$/.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
+      else if (cell !== '' && !isNaN(Number(cell))) { capacity = Number(cell); explicit = true; }
+      out.push({ date: dc.date, time, capacity, override, explicit });
     }
   }
   return out;
@@ -164,9 +164,24 @@ function computeTarget(capacity, booked, override) {
 }
 
 async function main() {
-  const booked = computeBooked();
   const slots = await loadCapacity();
   const today = todayStr();
+
+  // 定員確認モード：シートに実際に入力された数値/△/x だけを表示して終了（軽量・予約読取なし）
+  if (process.env.CAPACITY_ONLY === 'true') {
+    const ex = slots.filter(s => s.explicit && (!CONFIG.onlyFuture || s.date >= today))
+                    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+    let md = '# 定員マスター 実入力値（既定以外）\n\n';
+    md += `取得日時: ${new Date().toISOString()} ／ 既定以外の入力: ${ex.length}件\n\n`;
+    md += '| 日付 | 時間 | 定員 | 種別 |\n|---|---|---|---|\n';
+    for (const s of ex) md += `| ${s.date} | ${s.time} | ${s.override === 'stop' ? '×(停止)' : (s.override === 'request' ? '△(ﾘｸｴｽﾄ)' : s.capacity)} | ${s.explicit ? '入力' : '既定'} |\n`;
+    console.log(md);
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
+    log('capacity_only_done', { explicit: ex.length });
+    return;
+  }
+
+  const booked = computeBooked();
   const plan = [];
 
   for (const s of slots) {
