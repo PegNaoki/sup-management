@@ -232,11 +232,15 @@ function enforce(plan) {
     if (allMode.length) {
       runNode(MODE_SCRIPT[site], { SLOTS: JSON.stringify(allMode), DRY_RUN: 'false', HEADLESS: 'true' }, site, 'mode');
     }
-    // 在庫は即予約枠のみ、絶対値でセット（reduce は単一枠）
-    for (const p of immSlots) {
-      runNode(REDUCE_SCRIPT[site], {
-        SLOT_DATE: p.date, SLOT_TIME: p.time, SLOT_TARGET_STOCK: String(p.stock), DRY_RUN: 'false', HEADLESS: 'true',
-      }, site, 'reduce');
+    // 在庫の絶対値セットは任意（ENFORCE_STOCK=true のときだけ）。
+    // 既定はモードのみ反映＝各サイト1ログインで軽く、オーバーブッキング防御の本体を担う。
+    // 在庫の細かい数合わせは既存の差分連動(reduce-*)がリアルタイムで担当する。
+    if (process.env.ENFORCE_STOCK === 'true') {
+      for (const p of immSlots) {
+        runNode(REDUCE_SCRIPT[site], {
+          SLOT_DATE: p.date, SLOT_TIME: p.time, SLOT_TARGET_STOCK: String(p.stock), DRY_RUN: 'false', HEADLESS: 'true',
+        }, site, 'reduce');
+      }
     }
   }
 }
