@@ -220,13 +220,20 @@ async function ensureMonthShown(page, compact) {
 
   const year  = Number(compact.slice(0, 4));
   const month = Number(compact.slice(4, 6));
-  // 「YYYY年M月」ボタンを押す（先頭の空白有無に両対応で正規表現）
-  const monthBtn = page.getByRole('button', { name: new RegExp(`${year}\\s*年\\s*${month}\\s*月`) }).first();
-  if (await monthBtn.count() > 0) {
-    await monthBtn.click();
-    await page.waitForTimeout(1200);
+  const nameRe = new RegExp(`${year}\\s*年\\s*${month}\\s*月`);
+
+  // 「YYYY年M月」ボタンを押す。描画がAJAX遅延するため waitForSelector で待つ。
+  // 稀にクリックが取りこぼされる/描画が間に合わないので数回リトライする。
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const monthBtn = page.getByRole('button', { name: nameRe }).first();
+    if (await monthBtn.count() === 0) break; // 月ボタン自体が無ければリトライ不要
+    await monthBtn.click().catch(() => {});
+    try {
+      await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
+      log('month_ok', { compact, via: 'monthButton', attempt });
+      return;
+    } catch { /* 未描画。次のリトライへ */ }
     await page.waitForLoadState('networkidle').catch(() => {});
-    if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, via: 'monthButton' }); return; }
   }
 
   // 見つからない場合は候補をログに出して停止（手掛かり用）
