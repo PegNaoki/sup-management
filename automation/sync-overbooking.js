@@ -146,7 +146,9 @@ async function loadCapacity() {
       const cell = String(row[dc.col] == null ? '' : row[dc.col]).trim();
       let override = '', capacity = def, explicit = false;
       if (cell === '△' || cell === '▲') { override = 'request'; explicit = true; }
-      else if (/^[x×✕✖XＸ]$/.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
+      // ✗(U+2717) はシート凡例で使う記号。漏れると「空欄＝既定」と誤読して
+      // 受付停止のはずの枠を即予約で売ってしまうため、必ず含める。
+      else if (/^[x×✕✖✗❌XＸ]$/.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
       else if (cell !== '' && !isNaN(Number(cell))) { capacity = Number(cell); explicit = true; }
       out.push({ date: dc.date, time, capacity, override, explicit });
     }
@@ -158,7 +160,9 @@ async function loadCapacity() {
 function computeTarget(capacity, booked, override) {
   const C = Number(capacity) || 0, B = Number(booked) || 0;
   const R = C - B;
-  if (override === 'stop' || override === 'request') return { R, mode: 'request', stock: 0 };
+  // ✗(受付停止) は「満席」にする。△(リクエスト強制) とは別扱い。
+  if (override === 'stop') return { R, mode: 'closed', stock: 0 };
+  if (override === 'request') return { R, mode: 'request', stock: 0 };
   if (R <= CONFIG.requestAtOrBelow) return { R, mode: 'request', stock: 0 };
   return { R, mode: 'immediate', stock: R };
 }
@@ -199,7 +203,8 @@ async function main() {
   md += '| 日付 | 時間 | 定員C | 予約B(確定) | 残りR | 目標 | 在庫 | 備考 |\n|---|---|---|---|---|---|---|---|\n';
   for (const p of plan) {
     const note = [p.override ? `[${p.override}]` : '', p.R < 0 ? '⚠️定員超過' : ''].filter(Boolean).join(' ');
-    md += `| ${p.date} | ${p.time} | ${p.capacity} | ${p.booked} | ${p.R} | ${p.mode === 'immediate' ? '即予約' : 'リクエスト'} | ${p.stock} | ${note} |\n`;
+    const modeLabel = { immediate: '即予約', request: 'リクエスト', closed: '満席' }[p.mode] || p.mode;
+    md += `| ${p.date} | ${p.time} | ${p.capacity} | ${p.booked} | ${p.R} | ${modeLabel} | ${p.stock} | ${note} |\n`;
   }
   fs.writeFileSync('sync-overbooking-plan.md', md);
   fs.writeFileSync('sync-overbooking-plan.json', JSON.stringify({ computedAt: new Date().toISOString(), plan }, null, 2));
@@ -221,14 +226,18 @@ async function main() {
 //    - リクエスト対象（△/x/R≤1/超過）… 自動確定を止める必要がある
 //    - 予約が入っている即予約枠（B>0）… 在庫を残Rに合わせる必要がある
 function enforce(plan) {
-  const actionable = plan.filter(p => p.mode === 'request' || p.booked > 0);
+  const actionable = plan.filter(p => p.mode === 'request' || p.mode === 'closed' || p.booked > 0);
   log('enforce_scope', { total: plan.length, actionable: actionable.length });
   for (const site of CONFIG.sites) {
     const reqSlots = actionable.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
+    // 「満席」操作を実装済みなのは現状 AJ のみ。じゃらん/ウラカタは UI 未確認のため
+    // 従来どおり安全側（リクエスト＝自動確定させない）に倒す。
+    const closedMode = site === 'aj' ? 'closed' : 'request';
+    const clsSlots = actionable.filter(p => p.mode === 'closed').map(p => ({ date: p.date, time: p.time, mode: closedMode }));
     const immSlots = actionable.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
 
-    // モードはバッチ対応（SLOTS）。request と immediate をまとめて渡す。
-    const allMode = [...reqSlots, ...immSlots];
+    // モードはバッチ対応（SLOTS）。request / closed / immediate をまとめて渡す。
+    const allMode = [...reqSlots, ...clsSlots, ...immSlots];
     if (allMode.length) {
       runNode(MODE_SCRIPT[site], { SLOTS: JSON.stringify(allMode), DRY_RUN: 'false', HEADLESS: 'true' }, site, 'mode');
     }
