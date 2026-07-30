@@ -69,7 +69,7 @@ function assertConfig() {
   if (!CONFIG.password) miss.push('AJ_PASSWORD');
   if (!CONFIG.date)     miss.push('SLOT_DATE');
   if (!CONFIG.time)     miss.push('SLOT_TIME');
-  if (!CONFIG.delta)    miss.push('SLOT_DELTA');
+  if (CONFIG.targetStock === null && !CONFIG.delta) miss.push('SLOT_DELTA または SLOT_TARGET_STOCK');
   if (miss.length) throw new Error(`必須の環境変数が未設定: ${miss.join(', ')}`);
   if (Math.abs(CONFIG.delta) > CONFIG.maxAbs) {
     throw new Error(`増減 ${CONFIG.delta} が上限 ±${CONFIG.maxAbs} を超えています（安全停止）`);
