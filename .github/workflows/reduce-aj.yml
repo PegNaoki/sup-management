@@ -12,6 +12,7 @@ on:
       slot_delta: { description: "増減（-2=減 / +2=戻し）", required: false }
       slot_target_stock: { description: "絶対値：目標在庫（指定時はdelta無視）", required: false }
       dry_run:    { description: "true=保存しない",     required: false, default: "true" }
+      diag_fields: { description: "true=フォーム入力欄を洗い出すだけ（保存しない）", required: false, default: "false" }
 
 concurrency:
   group: ota-sync-aj
@@ -45,6 +46,7 @@ jobs:
           SLOT_DELTA: ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
           SLOT_TARGET_STOCK: ${{ github.event.client_payload.slot_target_stock || github.event.inputs.slot_target_stock }}
           DRY_RUN:    ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
+          DIAG_FIELDS: ${{ github.event.inputs.diag_fields || 'false' }}
           HEADLESS:   "true"
         run: node reduce-aj-slot.js
 
