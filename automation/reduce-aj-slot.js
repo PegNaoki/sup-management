@@ -139,6 +139,28 @@ async function main() {
       : Math.max(0, before + CONFIG.delta);
     log('plan', { before, target, mode: CONFIG.targetStock !== null ? 'absolute' : 'delta' });
 
+    // 診断：日セルのフォームを開き、表示中の入力欄を洗い出す（保存・例外なし＝LINE誤報を出さない）
+    if (process.env.DIAG_FIELDS === 'true') {
+      const dayBtn = page.locator(`.day_${compact} button`).first();
+      await dayBtn.click();
+      await page.waitForTimeout(1200);
+      const fields = await page.evaluate(() => {
+        const out = [];
+        document.querySelectorAll('input, select, textarea').forEach(el => {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) return; // 非表示は除外
+          out.push({ tag: el.tagName, type: el.type || '', id: el.id || '', name: el.name || '',
+                     value: el.value, role: el.getAttribute('role') || '',
+                     aria: el.getAttribute('aria-label') || '', ph: el.placeholder || '' });
+        });
+        return out.slice(0, 60);
+      });
+      log('diag_fields', { count: fields.length, fields });
+      result = 'diag';
+      await page.screenshot({ path: 'result-aj.png', fullPage: true }).catch(() => {});
+      return;
+    }
+
     if (CONFIG.dryRun) {
       result = 'dry_run';
       log('dry_run', { note: '変更せず確認のみ' });
