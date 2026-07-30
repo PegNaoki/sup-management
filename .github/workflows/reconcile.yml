@@ -41,7 +41,12 @@ jobs:
         working-directory: automation
         run: npx playwright install --with-deps chromium
 
+      # 1サイトの読み取り失敗で後続サイトまで止まると、予約数が欠けたまま
+      # 突合・反映に進んでしまう。各サイトは独立して続行させ、欠損があれば
+      # sync-overbooking 側が反映を中止する。
       - name: Read reservations from jalan
+        id: read_jalan
+        continue-on-error: true
         working-directory: automation
         env:
           JALAN_ID:       ${{ secrets.JALAN_ID }}
@@ -50,6 +55,7 @@ jobs:
         run: node reconcile-jalan.js
 
       - name: Post to GAS for reconciliation
+        if: steps.read_jalan.outcome == 'success'
         working-directory: automation
         env:
           GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
@@ -75,6 +81,8 @@ jobs:
           fi
 
       - name: Read reservations from urakata
+        id: read_urakata
+        continue-on-error: true
         working-directory: automation
         env:
           URKT_ID:       ${{ secrets.URKT_ID }}
@@ -85,6 +93,7 @@ jobs:
         run: node reconcile-urakata.js
 
       - name: Post urakata to GAS for reconciliation
+        if: steps.read_urakata.outcome == 'success'
         working-directory: automation
         env:
           GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
@@ -103,6 +112,8 @@ jobs:
           fi
 
       - name: Read reservations from activity japan
+        id: read_aj
+        continue-on-error: true
         working-directory: automation
         env:
           AJ_ID:       ${{ secrets.AJ_ID }}
@@ -111,6 +122,7 @@ jobs:
         run: node reconcile-aj.js
 
       - name: Post AJ to GAS for reconciliation
+        if: steps.read_aj.outcome == 'success'
         working-directory: automation
         env:
           GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
@@ -172,17 +184,30 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # 読み取りは continue-on-error のため、失敗したサイトを名指しで通知する。
+      # （以前は常に「じゃらん」と出ており、ウラカタ障害の原因究明を誤らせていた）
       - name: Notify failure to LINE
-        if: failure()
+        if: always() && (failure() || steps.read_jalan.outcome == 'failure' || steps.read_urakata.outcome == 'failure' || steps.read_aj.outcome == 'failure')
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
           LINE_USER:  ${{ secrets.LINE_USER_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JALAN_OUTCOME:   ${{ steps.read_jalan.outcome }}
+          URAKATA_OUTCOME: ${{ steps.read_urakata.outcome }}
+          AJ_OUTCOME:      ${{ steps.read_aj.outcome }}
         run: |
           if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
             echo "LINE未設定のため通知スキップ"; exit 0
           fi
-          TEXT="⚠️【定期突合 失敗】じゃらん予約一覧の読み取りまたは突合に失敗しました\nログ: ${RUN_URL}"
+          FAILED=""
+          [ "$JALAN_OUTCOME"   = "failure" ] && FAILED="${FAILED}じゃらん "
+          [ "$URAKATA_OUTCOME" = "failure" ] && FAILED="${FAILED}ウラカタ "
+          [ "$AJ_OUTCOME"      = "failure" ] && FAILED="${FAILED}アクティビティジャパン "
+          if [ -n "$FAILED" ]; then
+            TEXT="⚠️【定期突合 失敗】予約一覧の読み取りに失敗: ${FAILED}\n※予約数が不完全なため在庫反映は中止されます\nログ: ${RUN_URL}"
+          else
+            TEXT="⚠️【定期突合 失敗】突合または在庫反映に失敗しました\nログ: ${RUN_URL}"
+          fi
           PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
           curl -sS -X POST https://api.line.me/v2/bot/message/push \
             -H "Authorization: Bearer $LINE_TOKEN" \
