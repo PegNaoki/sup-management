@@ -62,7 +62,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Notify failure to LINE
-        if: failure()
+        if: failure() && github.event.inputs.diag_fields != 'true'
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
           LINE_USER:  ${{ secrets.LINE_USER_ID }}
