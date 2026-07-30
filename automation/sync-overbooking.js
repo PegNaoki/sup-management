@@ -31,7 +31,8 @@ const CONFIG = {
   capacityCsvUrl: process.env.CAPACITY_CSV_URL || '',
   resFiles: (process.env.RES_FILES || 'jalan-reservations.json,urakata-reservations.json,aj-reservations.json')
     .split(',').map(s => s.trim()).filter(Boolean),
-  requestAtOrBelow: parseInt(process.env.REQUEST_AT_OR_BELOW || '1', 10),
+  // 残りRがこの値以下なら満席にする。既定0＝「残り1名でも即予約で売る」。
+  requestAtOrBelow: parseInt(process.env.REQUEST_AT_OR_BELOW || '0', 10),
   onlyFuture: process.env.ONLY_FUTURE !== 'false',
   dryRun: process.env.DRY_RUN !== 'false',
   sites: ['urakata', 'jalan', 'aj'],
@@ -55,10 +56,11 @@ function normTime(v) {
 // ---- 予約総数B：ライブ予約JSON（確定のみ・人数合計）をキー"date time"で集計 ----
 function computeBooked() {
   const booked = new Map(); // "YYYY-MM-DD HH:MM" -> 人数合計（確定）
+  const missing = [];
   for (const f of CONFIG.resFiles) {
     let data;
     try { data = JSON.parse(fs.readFileSync(f, 'utf8')); }
-    catch (e) { log('res_file_skip', { file: f, error: e.message }); continue; }
+    catch (e) { log('res_file_skip', { file: f, error: e.message }); missing.push(f); continue; }
     const list = Array.isArray(data.reservations) ? data.reservations : [];
     for (const r of list) {
       if (r.status !== '確定') continue;            // ★確定のみ
@@ -69,7 +71,8 @@ function computeBooked() {
       booked.set(k, (booked.get(k) || 0) + (Number(r.people) || 0));
     }
   }
-  return booked;
+  if (missing.length) log('booked_incomplete', { missing });
+  return { booked, missing };
 }
 
 // ---- 定員マスターCSV（マトリクス）をパース → [{date,time,capacity,override}] ----
@@ -163,7 +166,8 @@ function computeTarget(capacity, booked, override) {
   // ✗(受付停止) は「満席」にする。△(リクエスト強制) とは別扱い。
   if (override === 'stop') return { R, mode: 'closed', stock: 0 };
   if (override === 'request') return { R, mode: 'request', stock: 0 };
-  if (R <= CONFIG.requestAtOrBelow) return { R, mode: 'request', stock: 0 };
+  // 予約で埋まった（残り0以下）＝満席。残り1名でも即予約で売る。
+  if (R <= CONFIG.requestAtOrBelow) return { R, mode: 'closed', stock: 0 };
   return { R, mode: 'immediate', stock: R };
 }
 
@@ -185,7 +189,7 @@ async function main() {
     return;
   }
 
-  const booked = computeBooked();
+  const { booked, missing } = computeBooked();
   const plan = [];
 
   for (const s of slots) {
@@ -215,6 +219,13 @@ async function main() {
   if (danger.length) log('overbooking_detected', { count: danger.length, slots: danger.map(d => `${d.date} ${d.time} R=${d.R}`) });
 
   if (CONFIG.dryRun) { log('done', { mode: 'dry_run', slots: plan.length }); return; }
+
+  // 予約JSONが1つでも欠けていると予約数Bが過少になり、残りRが過大＝売りすぎになる。
+  // 反映は中止する（プラン表示までは行うので状況は確認できる）。
+  if (missing.length) {
+    log('enforce_aborted', { reason: '予約データが不完全', missing });
+    throw new Error(`予約データが不完全なため反映を中止しました: ${missing.join(', ')}`);
+  }
 
   // ---- enforce（DRY_RUN=false）：各OTAへ絶対値で反映 ----
   enforce(plan);
