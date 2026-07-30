@@ -8,7 +8,16 @@ name: Reconcile OTA Reservations
 on:
   schedule:
     - cron: "0 */2 * * *"   # 2時間ごと（UTC。JSTでも2時間間隔で回る）
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      enforce:
+        description: "true=在庫同期を本番反映（各OTAをリクエスト化/即予約化）。既定はDRY_RUN"
+        required: false
+        default: "false"
+      enforce_stock:
+        description: "true=在庫の絶対値セットも実行（既定はモードのみ）"
+        required: false
+        default: "false"
 
 concurrency:
   group: ota-sync          # 在庫減算と同時にじゃらんへログインしない
@@ -121,15 +130,29 @@ jobs:
 
       # 在庫同期プラン（ライブ予約=確定のみでB算出、定員マスターCSVでC）。
       # 既定は DRY_RUN=true で無操作のプラン表を出すだけ（危険枠の可視化）。
-      - name: Overbooking sync plan (dry-run)
+      # 通常（スケジュール）は DRY_RUN。手動実行で inputs.enforce=true のときだけ本番反映。
+      - name: Overbooking sync (plan/enforce)
         if: always()
-        continue-on-error: true   # プラン算出の失敗でReconcile本体を落とさない（誤アラート防止）
+        continue-on-error: true   # 同期の失敗でReconcile本体を落とさない（誤アラート防止）
         working-directory: automation
         env:
           CAPACITY_CSV_URL: ${{ secrets.CAPACITY_CSV_URL }}
-          DRY_RUN: "true"
+          DRY_RUN: ${{ github.event.inputs.enforce == 'true' && 'false' || 'true' }}
+          ENFORCE_STOCK: ${{ github.event.inputs.enforce_stock || 'false' }}
+          # enforce時は各OTAへログインするため認証情報を渡す
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          SHOP_NAME:      ${{ secrets.SHOP_NAME }}
+          URKT_ID:        ${{ secrets.URKT_ID }}
+          URKT_PASSWORD:  ${{ secrets.URKT_PASSWORD }}
+          AJ_ID:          ${{ secrets.AJ_ID }}
+          AJ_PASSWORD:    ${{ secrets.AJ_PASSWORD }}
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+          HEADLESS:       "true"
         run: |
           if [ -z "$CAPACITY_CSV_URL" ]; then echo "CAPACITY_CSV_URL 未設定のためスキップ"; exit 0; fi
+          echo "DRY_RUN=$DRY_RUN ENFORCE_STOCK=$ENFORCE_STOCK"
           node sync-overbooking.js
 
       - name: Upload artifacts
