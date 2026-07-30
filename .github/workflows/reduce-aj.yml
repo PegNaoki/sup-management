@@ -13,6 +13,7 @@ on:
       slot_target_stock: { description: "絶対値：目標在庫（指定時はdelta無視）", required: false }
       dry_run:    { description: "true=保存しない",     required: false, default: "true" }
       diag_fields: { description: "true=フォーム入力欄を洗い出すだけ（保存しない）", required: false, default: "false" }
+      notify:     { description: "false=失敗してもLINE通知しない（検証用）", required: false, default: "true" }
 
 concurrency:
   group: ota-sync-aj
@@ -62,7 +63,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Notify failure to LINE
-        if: failure() && github.event.inputs.diag_fields != 'true'
+        if: failure() && github.event.inputs.diag_fields != 'true' && github.event.inputs.notify != 'false'
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
           LINE_USER:  ${{ secrets.LINE_USER_ID }}
