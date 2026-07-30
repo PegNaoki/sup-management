@@ -303,6 +303,9 @@ async function readCellMode(cell) {
     return null;
   }
   const s = cls.toLowerCase();
+  // 売止は <div class="icon-salestop"> で表される。予約方式より先に判定する
+  // （売止セルは span.sale-stop に元の予約方式クラスも併記されるため）。
+  if (s.includes('salestop') || s.includes('sale-stop')) return 'closed';
   if (s.includes('combination'))  return 'combination';
   if (s.includes('unconfirmed'))  return 'request';   // ※ 'confirmed' 判定より前に
   if (s.includes('confirmed'))    return 'immediate';
