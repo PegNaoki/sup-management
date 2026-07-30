@@ -220,19 +220,26 @@ async function ensureMonthShown(page, compact) {
 
   const year  = Number(compact.slice(0, 4));
   const month = Number(compact.slice(4, 6));
-  const nameRe = new RegExp(`${year}\\s*年\\s*${month}\\s*月`);
 
-  // 「YYYY年M月」ボタンを押す。描画がAJAX遅延するため waitForSelector で待つ。
-  // 稀にクリックが取りこぼされる/描画が間に合わないので数回リトライする。
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const monthBtn = page.getByRole('button', { name: nameRe }).first();
-    if (await monthBtn.count() === 0) break; // 月ボタン自体が無ければリトライ不要
-    await monthBtn.click().catch(() => {});
-    try {
-      await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
-      log('month_ok', { compact, via: 'monthButton', attempt });
-      return;
-    } catch { /* 未描画。次のリトライへ */ }
+  // 「YYYY年M月」ボタンを押す。getByRole の accessible name では拾えない
+  // ケース（遠い月など）があるため、テキスト内容で該当ボタンを走査して
+  // クリックする。描画のAJAX遅延に備え waitForSelector で待ち、数回リトライ。
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const clicked = await page.evaluate(({ year, month }) => {
+      const want = `${year}年${month}月`;
+      const els = [...document.querySelectorAll('button, a, [role="button"]')];
+      const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === want);
+      if (el) { el.click(); return true; }
+      return false;
+    }, { year, month });
+    if (clicked) {
+      try {
+        await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
+        log('month_ok', { compact, via: 'textScan', attempt });
+        return;
+      } catch { /* 未描画。次のリトライへ */ }
+    }
+    await page.waitForTimeout(600);
     await page.waitForLoadState('networkidle').catch(() => {});
   }
 
@@ -247,10 +254,16 @@ async function ensureMonthShown(page, compact) {
 // hidden input の在庫値を読む（idが数字始まりのため属性セレクタを使う）
 async function readVal(page, valId) {
   const loc = page.locator(`input[id="${valId}"]`);
-  const exists = await loc.count();
-  const raw = exists ? await loc.inputValue().catch(() => null) : null;
   const statusId = valId.replace(/_val$/, '_status');
-  const rawStatus = await page.locator(`input[id="${statusId}"]`).inputValue().catch(() => null);
+  let exists = 0, raw = null, rawStatus = null;
+  // 値が未反映（空）で返ることがあるので、数回リトライして待つ。
+  for (let i = 0; i < 3; i++) {
+    exists = await loc.count();
+    raw = exists ? await loc.inputValue().catch(() => null) : null;
+    rawStatus = await page.locator(`input[id="${statusId}"]`).inputValue().catch(() => null);
+    if (raw !== null && raw !== '') break;
+    await page.waitForTimeout(700);
+  }
   log('read_val_detail', { exists, raw, status: rawStatus });
   if (raw === null || raw === '') return null;
   const n = parseInt(raw, 10);
