@@ -167,7 +167,13 @@ async function main() {
       log('dry_run', { note: '変更せず確認のみ' });
     } else {
       // ---------- 5. 日セルのボタン→spinbutton→設定 ----------
-      const dayBtn = page.locator(`.day_${compact} button`).first();
+      // 同じ .day_YYYYMMDD が全時間帯の行に存在するため、first() では
+      // 常に先頭行(最も早い時間)を選んでしまう。対象の在庫値(valId)を
+      // 内包するセルに限定して、正しい行×日付のボタンを押す。
+      const dayBtn = page.locator(`td:has(input[id="${valId}"]) button`).first();
+      if (await dayBtn.count() === 0) {
+        throw new SlotSyncError(`対象セルのボタンが見つかりません（valId=${valId}）`);
+      }
       await dayBtn.click();
       const spin = page.getByRole('spinbutton').first();
       await spin.waitFor({ state: 'visible', timeout: 8000 });
