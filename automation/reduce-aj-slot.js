@@ -148,7 +148,12 @@ async function main() {
       await dayBtn.click();
       const spin = page.getByRole('spinbutton').first();
       await spin.waitFor({ state: 'visible', timeout: 8000 });
+      // 診断：入力欄の上限(max/min)と、fill後に実際に入った値（AJ側で丸められると分かる）
+      const spinAttrs = await spin.evaluate(el => ({ max: el.max, min: el.min, step: el.step })).catch(() => ({}));
+      log('spin_attrs', spinAttrs);
       await spin.fill(String(target));
+      const spinFilled = await spin.inputValue().catch(() => null);
+      log('spin_filled', { requested: target, actual: spinFilled });
       const saveResp = page.waitForResponse(res => res.request().method() !== 'GET', { timeout: 12000 }).catch(() => null);
       await page.getByRole('button', { name: '設定' }).click();
       const resp = await saveResp;
