@@ -15,6 +15,7 @@ on:
       dry_run:   { description: "true=保存しない",     required: false, default: "true" }
       slots:     { description: "一括JSON配列（指定時は上記より優先）", required: false, default: "" }
       dump_panel: { description: "true=変更パネルのselect/inputを調査出力するだけ", required: false, default: "false" }
+      debug_dom:  { description: "true=対象セルのHTMLをログ出力（状態判定の調査用）", required: false, default: "false" }
       notify:    { description: "false=失敗してもLINE通知しない（検証用）", required: false, default: "true" }
 
 concurrency:
@@ -52,6 +53,7 @@ jobs:
           STOCK:      ${{ github.event.client_payload.stock || github.event.inputs.stock || '0' }}
           DRY_RUN:    ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
           DUMP_PANEL: ${{ github.event.inputs.dump_panel || 'false' }}
+          DEBUG_DOM:  ${{ github.event.inputs.debug_dom || 'false' }}
           HEADLESS:   "true"
         run: node mode-jalan-slot.js
 
