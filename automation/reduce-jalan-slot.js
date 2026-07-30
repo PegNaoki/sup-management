@@ -89,7 +89,7 @@ function normalizeYmd(d) {
 function assertConfig() {
   const miss = [];
   ['id', 'password', 'date', 'time'].forEach(k => { if (!CONFIG[k]) miss.push(k); });
-  if (!CONFIG.delta) miss.push('delta(SLOT_DELTA/SLOT_DECREMENT)');
+  if (CONFIG.targetStock === null && !CONFIG.delta) miss.push('delta(SLOT_DELTA/SLOT_DECREMENT) または SLOT_TARGET_STOCK');
   if (miss.length) throw new Error(`必須の環境変数が未設定: ${miss.join(', ')}`);
   if (Math.abs(CONFIG.delta) > CONFIG.maxDec) {
     throw new Error(`増減 ${CONFIG.delta} が上限 ±${CONFIG.maxDec} を超えています（安全停止）`);
