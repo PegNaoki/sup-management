@@ -295,7 +295,13 @@ async function readCellMode(cell) {
     if (cls) break;
     await cell.page().waitForTimeout(500);
   }
-  if (!cls) return null;
+  // 売止のセルは予約方式アイコンが消え「売止」表記だけになる。
+  // アイコンが取れない＝判定不能ではなく、まず売止かどうかを本文で確かめる。
+  if (!cls) {
+    const txt = await cell.innerText().catch(() => '');
+    if (txt.includes('売止')) return 'closed';
+    return null;
+  }
   const s = cls.toLowerCase();
   if (s.includes('combination'))  return 'combination';
   if (s.includes('unconfirmed'))  return 'request';   // ※ 'confirmed' 判定より前に
