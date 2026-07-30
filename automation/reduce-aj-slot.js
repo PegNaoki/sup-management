@@ -82,6 +82,7 @@ async function main() {
 
   const browser = await chromium.launch({
     headless: CONFIG.headless,
+    slowMo: parseInt(process.env.SLOW_MO || '0', 10), // 録画/目視用に各操作を遅延（ms）
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined,
     args: ['--disable-blink-features=AutomationControlled'],
   });
