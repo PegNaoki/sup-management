@@ -75,7 +75,7 @@ function buildTasks() {
     const mode = String(s.mode || '').toLowerCase();
     const stock = parseInt(s.stock || 0, 10);
     if (!date || !time) throw new Error(`slots[${i}]: date/time が不正 (${JSON.stringify(s)})`);
-    if (!['request', 'immediate'].includes(mode)) throw new Error(`slots[${i}]: mode は request|immediate`);
+    if (!['request', 'immediate', 'closed'].includes(mode)) throw new Error(`slots[${i}]: mode は request|immediate|closed`);
     if (mode === 'immediate' && !stock) throw new Error(`slots[${i}]: 即予約化には stock が必要`);
     return { date, time, mode, stock, compact: ymdCompact(date) };
   });
@@ -174,11 +174,18 @@ async function switchOneSlot(page, task) {
 
   const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
   const beforeStatus = await readStatus(page, statusId);
-  const targetStatus = mode === 'request' ? 3 : 1;
+  // 満席のstatus値はサイト仕様が未確認のため、closed は「即予約(1)でも
+  // リクエスト(3)でもない状態」になったことで検証する（実値はログに残す）。
+  const targetStatus = mode === 'request' ? 3 : (mode === 'closed' ? null : 1);
   log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
 
-  if (beforeStatus === targetStatus) {
+  if (targetStatus !== null && beforeStatus === targetStatus) {
     log('slot_already', { date, time, note: `既に${statusMeaning(targetStatus)}` });
+    return { result: 'already' };
+  }
+  // closed 希望で、既に即予約でもリクエストでもない＝受付停止済みなら何もしない
+  if (mode === 'closed' && beforeStatus !== 1 && beforeStatus !== 3) {
+    log('slot_already', { date, time, note: `既に受付停止(status=${beforeStatus})` });
     return { result: 'already' };
   }
   // 「開催なし(4)」は運営が意図的に閉じた枠。自動で開けない（即予約化しない）。
@@ -198,6 +205,8 @@ async function switchOneSlot(page, task) {
 
   if (mode === 'request') {
     await page.getByRole('button', { name: 'リクエスト にする' }).click();
+  } else if (mode === 'closed') {
+    await page.getByRole('button', { name: '満席 にする' }).click();
   } else {
     const spin = page.getByRole('spinbutton').first();
     await spin.waitFor({ state: 'visible', timeout: 8000 });
@@ -212,7 +221,12 @@ async function switchOneSlot(page, task) {
   await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
   await ensureMonthShown(page, compact);
   const afterStatus = await readStatus(page, statusId);
-  if (afterStatus !== targetStatus) {
+  if (mode === 'closed') {
+    log('closed_status_observed', { date, time, afterStatus, meaning: statusMeaning(afterStatus) });
+    if (afterStatus === 1 || afterStatus === 3) {
+      throw new SlotSyncError(`満席化検証NG：リロード後も受付可能(${statusMeaning(afterStatus)})`);
+    }
+  } else if (afterStatus !== targetStatus) {
     throw new SlotSyncError(`切替検証NG：想定(${targetStatus})だがリロード後は(${afterStatus})`);
   }
   log('slot_switched', { date, time, from: statusMeaning(beforeStatus), to: statusMeaning(afterStatus) });
