@@ -217,10 +217,15 @@ async function main() {
 }
 
 // 目標状態を各サイトの mode-*/reduce-* を子プロセスで実行して反映する。
+// ※「対応が必要な枠」だけに限定する（予約ゼロの遠い未来の空枠まで触らない）：
+//    - リクエスト対象（△/x/R≤1/超過）… 自動確定を止める必要がある
+//    - 予約が入っている即予約枠（B>0）… 在庫を残Rに合わせる必要がある
 function enforce(plan) {
+  const actionable = plan.filter(p => p.mode === 'request' || p.booked > 0);
+  log('enforce_scope', { total: plan.length, actionable: actionable.length });
   for (const site of CONFIG.sites) {
-    const reqSlots = plan.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
-    const immSlots = plan.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
+    const reqSlots = actionable.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
+    const immSlots = actionable.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
 
     // モードはバッチ対応（SLOTS）。request と immediate をまとめて渡す。
     const allMode = [...reqSlots, ...immSlots];
