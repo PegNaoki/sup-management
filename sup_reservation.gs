@@ -1021,7 +1021,16 @@ function getSlotCapacity(sheet, dateVal, timeVal) {
     if (!isNaN(p)) total += p;
   }
 
-  const limit = targetSlot === '午前' ? CONFIG.MORNING_LIMIT : CONFIG.AFTERNOON_LIMIT;
+  // 上限は「定員マスター」を優先（該当日時の定員／既定）。
+  // 読めない・未設定の場合のみ従来の固定値(MORNING/AFTERNOON_LIMIT)にフォールバック。
+  let limit = targetSlot === '午前' ? CONFIG.MORNING_LIMIT : CONFIG.AFTERNOON_LIMIT;
+  try {
+    const master = loadCapacityMaster_(sheet.getParent());
+    const cap = capacityFor_(master, normalizeSlotDate_(dateVal), normalizeSlotTime_(timeVal));
+    if (cap !== null && cap !== undefined) limit = cap;
+  } catch (e) {
+    Logger.log(`定員マスター参照失敗（固定値を使用）: ${e.message}`);
+  }
   return { total, limit };
 }
 
