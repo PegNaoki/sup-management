@@ -1,11 +1,14 @@
 // ============================================================
 // ウラカタ (the-retreat-place.urkt.in ＝ アソビュー共通在庫) 枠モード切替（バッチ対応）
 // ------------------------------------------------------------
-// ウラカタには「即予約/リクエスト」の切替UIは無く、即時販売在庫 calendarRealtimeLimit
-// 「( n )」の数字だけで決まる（数字あり=即予約 / 0=即時販売停止＝リクエスト受付は継続）。
-//   → mode を「( ) の数字」に翻訳して設定する：
-//       request   → 0
-//       immediate → stock（残り枠）
+// ウラカタは「販売状態」と「即時販売在庫」の2軸で決まる：
+//   [data-test=calendarOpen]          ◯=販売中 / ✕=売止（クリックでトグル→保存）
+//   [data-test=calendarRealtimeLimit] ( n )＝即時販売在庫
+//   → mode の対応：
+//       closed    → ✕（売止）。在庫は触らない
+//       request   → ◯ かつ ( 0 )（即時販売は止めるがリクエストは受ける）
+//       immediate → ◯ かつ ( stock )
+//   売止からの復帰は ◯ に戻してから在庫を設定する（保存は最後に1回）。
 //
 // ログイン〜予約枠〜対象日ジャンプ〜セル特定〜入力保存 は reduce-urakata-slot.js から流用。
 //
@@ -14,7 +17,7 @@
 //   ▼ 一括指定（優先）:
 //     SLOTS: '[{"date":"2026-08-08","time":"10:00","mode":"immediate","stock":6}, ...]'
 //   ▼ 単一指定（手動テスト用）:
-//     SLOT_DATE / SLOT_TIME / MODE(request|immediate) / STOCK
+//     SLOT_DATE / SLOT_TIME / MODE(request|immediate|closed) / STOCK
 //   DRY_RUN (既定 true) / HEADLESS (既定 true)
 // ============================================================
 
@@ -79,7 +82,7 @@ function buildTasks() {
     const mode = String(s.mode || '').toLowerCase();
     const stock = parseInt(s.stock || 0, 10);
     if (!date || !time) throw new Error(`slots[${i}]: date/time が不正 (${JSON.stringify(s)})`);
-    if (!['request', 'immediate'].includes(mode)) throw new Error(`slots[${i}]: mode は request|immediate`);
+    if (!['request', 'immediate', 'closed'].includes(mode)) throw new Error(`slots[${i}]: mode は request|immediate|closed`);
     if (mode === 'immediate' && !stock) throw new Error(`slots[${i}]: 即予約には stock(残り枠) が必要`);
     return { date, time, mode, stock };
   }).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
@@ -174,9 +177,43 @@ async function switchOneSlot(page, task) {
     return { result: 'dumped' };
   }
 
+  // 販売状態（◯/✕）は在庫数とは別軸。売止は✕にするだけで在庫は触らない。
+  const openBefore = await readOpen(cell);
+  if (mode === 'closed') {
+    log('slot_before', { date, time, mode, openBefore });
+    if (openBefore === null) throw new SlotSyncError('販売状態(calendarOpen)を読み取れませんでした');
+    if (openBefore === false) {
+      log('slot_already', { date, time, note: '既に売止(✕)' });
+      return { result: 'already' };
+    }
+    if (CONFIG.dryRun) {
+      log('slot_dry_run', { date, time, note: '販売(◯) → 売止(✕)（変更せず）' });
+      return { result: 'dry_run' };
+    }
+    await cell.locator(OPEN_SELECTOR).first().click();
+    await page.waitForTimeout(600);
+    await saveAndWait(page);
+    const after = await reloadAndReadOpen(page, date, time);
+    if (after !== false) throw new SlotSyncError(`売止検証NG：想定(✕)だがリロード後は(${after})`);
+    log('slot_switched', { date, time, from: '◯', to: '✕', mode });
+    return { result: 'switched' };
+  }
+
   const before = await readLimit(cell);
-  log('slot_before', { date, time, mode, before, target });
+  log('slot_before', { date, time, mode, before, target, openBefore });
   if (before === null) throw new SlotSyncError('即時販売在庫(calendarRealtimeLimit)を読み取れませんでした');
+
+  // 売止(✕)から復帰する場合は、先に◯へ戻してから在庫を設定する（保存は最後に1回）。
+  const needReopen = openBefore === false;
+  if (needReopen && !CONFIG.dryRun) {
+    await cell.locator(OPEN_SELECTOR).first().click();
+    await page.waitForTimeout(600);
+    log('reopened', { date, time, note: '売止(✕) → 販売(◯)' });
+  }
+  if (needReopen && CONFIG.dryRun) {
+    log('slot_dry_run', { date, time, note: `売止(✕) → 販売(◯) かつ ( ${before} ) → ( ${target} )（変更せず）` });
+    return { result: 'dry_run' };
+  }
 
   if (before === target) {
     log('slot_already', { date, time, note: `既に(${target}) ＝ ${mode}` });
@@ -204,18 +241,7 @@ async function switchOneSlot(page, task) {
   await input.blur().catch(() => {});
   await page.locator('[data-test=courseName]').first().click({ position: { x: 5, y: 5 } }).catch(() => {});
 
-  const saveBtn = page.locator('[data-test="saveBtn"]');
-  await saveBtn.waitFor({ state: 'visible', timeout: 10000 });
-  for (let w = 0; w < 20; w++) {
-    if (await saveBtn.isEnabled().catch(() => false)) break;
-    await page.waitForTimeout(500);
-  }
-  if (!(await saveBtn.isEnabled().catch(() => false))) throw new SlotSyncError('保存ボタンが有効になりませんでした');
-  const saveResp = page.waitForResponse(res => res.request().method() !== 'GET', { timeout: 15000 }).catch(() => null);
-  await saveBtn.click();
-  await saveResp;
-  await page.waitForTimeout(2000);
-  await page.waitForLoadState('networkidle').catch(() => {});
+  await saveAndWait(page);
 
   // リロードして検証
   await page.reload({ waitUntil: 'networkidle' });
@@ -285,6 +311,32 @@ async function locateCell(page, date, time) {
     rowCells[colIdx].setAttribute('data-urkt-target', '1');
     return { ok: true, rowIdx, colIdx, header: `${dd}(${youbi})` };
   }, { dateStr: date, time: time, course: CONFIG.course });
+}
+
+// 保存ボタンが有効になるのを待って押し、レスポンスを待つ。
+async function saveAndWait(page) {
+  await saveAndWait(page);
+}
+
+// リロードして対象セルを取り直し、販売状態を読む（保存検証用）。
+async function reloadAndReadOpen(page, date, time) {
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('[data-test=courseName]', { timeout: 20000 });
+  await jumpToDate(page, date);
+  const found = await locateCell(page, date, time);
+  if (!found.ok) throw new SlotSyncError('保存後の再特定に失敗（要手動確認）');
+  return await readOpen(page.locator('[data-urkt-target="1"]'));
+}
+
+// 販売状態（◯=販売中 / ✕=売止）。data-test で安定して取得できる。
+const OPEN_SELECTOR = '[data-test=calendarOpen]';
+async function readOpen(cell) {
+  const t = await cell.locator(OPEN_SELECTOR).first().innerText().catch(() => null);
+  if (t === null) return null;
+  const s = t.trim();
+  if (/[◯○◎]/.test(s)) return true;
+  if (/[✕✖×]/.test(s)) return false;
+  return null;
 }
 
 async function readLimit(cell) {
