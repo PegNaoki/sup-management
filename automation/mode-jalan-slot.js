@@ -36,6 +36,10 @@ const RT_TO_MODE = { KeyUNCONFIRMED: 'request', KeyCONFIRMED: 'immediate', KeyCO
 function rtMeaning(rt) {
   return { KeyCONFIRMED: '即時予約', KeyUNCONFIRMED: 'リクエスト予約', KeyCOMBINATION: '併用' }[rt] || `不明(${rt})`;
 }
+// modeをそのまま日本語化（closed は reservationType を持たないため rtMeaning では表せない）
+function modeMeaning(mode) {
+  return { immediate: '即時予約', request: 'リクエスト予約', combination: '併用', closed: '売止' }[mode] || `不明(${mode})`;
+}
 
 const RUN_LOG = [];
 function log(event, data = {}) {
@@ -80,7 +84,7 @@ function buildTasks() {
     const mode = String(s.mode || '').toLowerCase();
     const stock = parseInt(s.stock || 0, 10);
     if (!date || !time) throw new Error(`slots[${i}]: date/time が不正 (${JSON.stringify(s)})`);
-    if (!MODE_TO_RT[mode]) throw new Error(`slots[${i}]: mode は request|immediate|combination`);
+    if (mode !== 'closed' && !MODE_TO_RT[mode]) throw new Error(`slots[${i}]: mode は request|immediate|combination|closed`);
     if (mode === 'combination' && !stock) throw new Error(`slots[${i}]: 併用には stock(定員) が必要`);
     return { date, time, mode, stock };
   })
@@ -177,7 +181,7 @@ async function switchOneSlot(mng, task) {
   // 1. 対象セルから現在の予約タイプ（アイコン）を読む
   let cell = await getCell(mng, date, time);
   const beforeMode = await readCellMode(cell);
-  log('slot_before', { date, time, mode, beforeMode, meaning: rtMeaning(MODE_TO_RT[beforeMode] || '') });
+  log('slot_before', { date, time, mode, beforeMode, meaning: modeMeaning(beforeMode) });
 
   // 現在モードが読めない＝セル描画待ち失敗など。全体を落とさずスキップ（誤通知防止）。
   if (beforeMode === null) {
@@ -211,20 +215,35 @@ async function switchOneSlot(mng, task) {
   }
 
   if (beforeMode === mode) {
-    log('slot_already', { date, time, note: `既に${rtMeaning(targetRt)}` });
+    log('slot_already', { date, time, note: `既に${modeMeaning(mode)}` });
     return { result: 'already' };
   }
   if (CONFIG.dryRun) {
-    log('slot_dry_run', { date, time, note: `${rtMeaning(MODE_TO_RT[beforeMode] || '')} → ${rtMeaning(targetRt)}（変更せず）` });
+    log('slot_dry_run', { date, time, note: `${modeMeaning(beforeMode)} → ${modeMeaning(mode)}（変更せず）` });
     return { result: 'dry_run' };
   }
 
-  // 2. セルのリンクを開いて reservationType を変更 → 一括変更する
+  // 2. セルのリンクを開いてパネルを変更 → 一括変更する
   const link = cell.locator('a.action-link, a').first();
   await link.click();
-  const sel = mng.locator('select[name="reservationType"]').first();
-  await sel.waitFor({ state: 'visible', timeout: 10000 });
-  await sel.selectOption(targetRt);
+
+  // 販売可否(saleStatus)は予約方式(reservationType)とは独立した軸。
+  //   '' = 変更しない / 'true' = 販売 / 'false' = 売止
+  // 同名のselectが複数あるが、値を持つのは option[value="false"] を含むものだけ。
+  const saleSel = mng.locator('select[name="saleStatus"]')
+    .filter({ has: mng.locator('option[value="false"]') }).first();
+
+  if (mode === 'closed') {
+    // 売止にする。予約方式は触らない（変更しない）。
+    await saleSel.waitFor({ state: 'visible', timeout: 10000 });
+    await saleSel.selectOption('false');
+  } else {
+    // 売止から復帰できるよう、必ず「販売」に戻したうえで予約方式を設定する。
+    if (await saleSel.count() > 0) await saleSel.selectOption('true').catch(() => {});
+    const sel = mng.locator('select[name="reservationType"]').first();
+    await sel.waitFor({ state: 'visible', timeout: 10000 });
+    await sel.selectOption(targetRt);
+  }
 
   // 併用は「受付制限を変更する＋定員の数値」も必要
   if (mode === 'combination') {
