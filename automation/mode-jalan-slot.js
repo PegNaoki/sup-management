@@ -227,10 +227,11 @@ async function switchOneSlot(mng, task) {
   const link = cell.locator('a.action-link, a').first();
   await link.click();
 
-  // 販売可否(saleStatus)は予約方式(reservationType)とは独立した軸。
+  // 販売可否は予約方式(reservationType)とは独立した軸。
   //   '' = 変更しない / 'true' = 販売 / 'false' = 売止
-  // 同名のselectが複数あるが、値を持つのは option[value="false"] を含むものだけ。
-  const saleSel = mng.locator('select[name="saleStatus"]')
+  // name="saleStatus" の実体は hidden（js-groupFrontOpenFlg）で操作できない。
+  // 実際に操作するのは name を持たない表示中のselect。値で見分ける。
+  const saleSel = mng.locator('select:visible')
     .filter({ has: mng.locator('option[value="false"]') }).first();
 
   if (mode === 'closed') {
