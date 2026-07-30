@@ -160,6 +160,20 @@ async function switchOneSlot(page, task) {
   let found = await locateCell(page, date, time);
   if (!found.ok) throw new SlotSyncError(`対象枠が見つかりません: ${found.reason}`);
   let cell = page.locator('[data-urkt-target="1"]');
+
+  // 販売状態（◯/✕）の実DOMを調査する。変更も例外送出もしない。
+  if (process.env.DUMP_CELL === 'true') {
+    const info = await cell.evaluate(el => {
+      const marks = [...el.querySelectorAll('*')]
+        .filter(n => /^[◯○◎✕✖×△]$/.test((n.textContent || '').trim()))
+        .map(n => ({ tag: n.tagName, cls: n.className, dt: n.getAttribute('data-test') || '',
+                     text: (n.textContent || '').trim() }));
+      return { html: el.outerHTML.slice(0, 2500), text: (el.innerText || '').trim(), marks };
+    });
+    log('dump_cell', info);
+    return { result: 'dumped' };
+  }
+
   const before = await readLimit(cell);
   log('slot_before', { date, time, mode, before, target });
   if (before === null) throw new SlotSyncError('即時販売在庫(calendarRealtimeLimit)を読み取れませんでした');
