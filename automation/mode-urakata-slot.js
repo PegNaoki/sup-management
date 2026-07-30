@@ -315,7 +315,18 @@ async function locateCell(page, date, time) {
 
 // 保存ボタンが有効になるのを待って押し、レスポンスを待つ。
 async function saveAndWait(page) {
-  await saveAndWait(page);
+  const saveBtn = page.locator('[data-test="saveBtn"]');
+  await saveBtn.waitFor({ state: 'visible', timeout: 10000 });
+  for (let w = 0; w < 20; w++) {
+    if (await saveBtn.isEnabled().catch(() => false)) break;
+    await page.waitForTimeout(500);
+  }
+  if (!(await saveBtn.isEnabled().catch(() => false))) throw new SlotSyncError('保存ボタンが有効になりませんでした');
+  const saveResp = page.waitForResponse(res => res.request().method() !== 'GET', { timeout: 15000 }).catch(() => null);
+  await saveBtn.click();
+  await saveResp;
+  await page.waitForTimeout(2000);
+  await page.waitForLoadState('networkidle').catch(() => {});
 }
 
 // リロードして対象セルを取り直し、販売状態を読む（保存検証用）。
