@@ -246,19 +246,41 @@ async function switchOneSlot(mng, task) {
     await sel.selectOption(targetRt);
   }
 
-  // 併用は「受付制限を変更する＋定員の数値」も必要
-  if (mode === 'combination') {
+  // 併用・即時は「受付制限を変更する＋定員の数値」も必要。
+  // リクエスト予約の枠は定員を持たないため、定員を与えずに即時へ変えても
+  // じゃらん側が受け付けずリクエストのまま戻る（request→immediate が全滅していた原因）。
+  // 併用・売止からの即時化が通っていたのは、その枠が既に定員を持っていたから。
+  if (mode === 'combination' || mode === 'immediate') {
     const limitSel = mng.locator('select').filter({ has: mng.getByRole('option', { name: '変更する', exact: true }) }).first();
     await limitSel.selectOption('1');
     await mng.waitForTimeout(400);
     const numInput = mng.locator('input.js-panel-textBox-input').first();
     await numInput.waitFor({ state: 'visible', timeout: 8000 });
-    await numInput.fill(String(stock));
+    // 即時で定員0を書くと売れない枠になる。在庫は必ず1以上にする。
+    const n = Math.max(1, Number(stock) || 0);
+    await numInput.fill(String(n));
+    log('limit_set', { date, time, mode, stock: n });
   }
 
   await mng.getByRole('button', { name: '一括変更する' }).click();
   await mng.waitForLoadState('networkidle').catch(() => {});
   await mng.waitForTimeout(1500);
+
+  // 保存が黙って弾かれても分かるよう、画面のエラー表示を拾っておく。
+  // （これが無かったため「検証NG」としか分からず原因究明に時間がかかった）
+  const errText = await mng.evaluate(() => {
+    const sels = ['.error', '.errorMessage', '.error-message', '[class*="error"]', '.alert'];
+    const seen = new Set();
+    for (const s of sels) {
+      for (const el of document.querySelectorAll(s)) {
+        if (!el.offsetParent) continue;
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (t && t.length < 300) seen.add(t);
+      }
+    }
+    return [...seen].slice(0, 5);
+  }).catch(() => []);
+  if (errText.length) log('panel_error', { date, time, mode, errors: errText });
 
   // 3. カレンダーをリロードして、セルのアイコンで検証
   await backToCalendar(mng);

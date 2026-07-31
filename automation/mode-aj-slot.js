@@ -250,34 +250,42 @@ async function openCalendarMenu(page) {
   throw new SlotSyncError('カレンダー管理・在庫管理メニューを開けませんでした');
 }
 
+// 対象月を表示する。reduce-aj-slot.js の実装（textScan方式）と揃える。
+// getByRole の accessible name では遠い月の月ボタンを拾えず、「次月」送りも
+// AJ の画面には該当要素が無いため、9月以降へ移動できず全枠スキップになっていた。
 async function ensureMonthShown(page, compact) {
-  if (await page.locator(`.day_${compact}`).count() > 0) return;
-  const year = Number(compact.slice(0, 4)), month = Number(compact.slice(4, 6));
-  const monthRe = new RegExp(`${year}\\s*年\\s*${month}\\s*月`);
+  if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, nav: 0 }); return; }
 
-  // まず対象月ボタンが直接あれば押す
-  const monthBtn = page.getByRole('button', { name: monthRe }).first();
-  if (await monthBtn.count() > 0) {
-    await monthBtn.click(); await page.waitForTimeout(1200); await page.waitForLoadState('networkidle').catch(() => {});
-    if (await page.locator(`.day_${compact}`).count() > 0) return;
-  }
+  const year  = Number(compact.slice(0, 4));
+  const month = Number(compact.slice(4, 6));
 
-  // 直接ボタンが無ければ「次月」送りを繰り返して対象月まで進める（best-effort）
-  for (let i = 0; i < 8; i++) {
-    const next = page.locator(
-      'a[aria-label*="次"], button[aria-label*="次"], .fc-next-button, a:has-text("次の月"), button:has-text("次の月"), a:has-text("›"), button:has-text("›")'
-    ).first();
-    if (await next.count() === 0) break;
-    await next.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(1000); await page.waitForLoadState('networkidle').catch(() => {});
-    if (await page.locator(`.day_${compact}`).count() > 0) return;
-    const mb = page.getByRole('button', { name: monthRe }).first();
-    if (await mb.count() > 0) {
-      await mb.click(); await page.waitForTimeout(1000); await page.waitForLoadState('networkidle').catch(() => {});
-      if (await page.locator(`.day_${compact}`).count() > 0) return;
+  // 「YYYY年M月」ボタンをテキスト内容で走査してクリックする。
+  // 描画のAJAX遅延に備え waitForSelector で待ち、数回リトライする。
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const clicked = await page.evaluate(({ year, month }) => {
+      const want = `${year}年${month}月`;
+      const els = [...document.querySelectorAll('button, a, [role="button"]')];
+      const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === want);
+      if (el) { el.click(); return true; }
+      return false;
+    }, { year, month });
+    if (clicked) {
+      try {
+        await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
+        log('month_ok', { compact, via: 'textScan', attempt });
+        return;
+      } catch { /* 未描画。次のリトライへ */ }
     }
+    await page.waitForTimeout(600);
+    await page.waitForLoadState('networkidle').catch(() => {});
   }
-  throw new SlotSyncError(`対象月に移動できません（${compact}）`);
+
+  // 見つからない場合は候補をログに出して停止（手掛かり用）
+  const buttons = await page.$$eval('button', els => els.map(e => (e.textContent || '').replace(/\s+/g, '').trim()).filter(t => /\d{4}年\d{1,2}月/.test(t)).slice(0, 20)).catch(() => []);
+  const months = await page.$$eval('[class*="_day"]', els => {
+    const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
+  }).catch(() => []);
+  throw new SlotSyncError(`対象月に移動できません（${compact}）。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(months)}`);
 }
 
 // ボタンを「表示テキストの完全一致」で押す。getByRole の accessible name は
