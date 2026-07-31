@@ -4,12 +4,14 @@
 // B（予約総数）は「実サイトのライブ予約（確定のみ）」から算出する。
 //   → Reconcile が読んだ *-reservations.json を入力に使う（転記シートは使わない）。
 // C（定員）は「定員マスター」タブを CSV公開したURLから読む。
-//   セル意味：数字=定員 / △=リクエスト強制 / x=受付停止 / 空=既定(B列)
+//   セル意味：数字=定員 / △=リクエスト強制 / ✗=受付停止 / 空=既定(B列)
 //
-// 状態機械（R = C − B, 安全マージン R≤1 でリクエスト化）：
-//   R >= 2 : 即予約 ／ 即予約在庫 = R
-//   R <= 1 : リクエスト ＋ 在庫0
-//   （△=常にリクエスト / x=リクエスト＋0 は優先）
+// 状態機械（R = C − B）：
+//   ✗      : 満席（受付停止）
+//   △      : リクエスト ＋ 在庫0
+//   R >= 1 : 即予約 ／ 即予約在庫 = R（残り1名でも売る）
+//   R <= 0 : 満席（予約で埋まった）
+//   しきい値は REQUEST_AT_OR_BELOW で変更できる（既定0）。
 //
 // 既定は DRY_RUN=true（無操作でプラン表を出すだけ）。
 // DRY_RUN=false のとき、各OTAの mode-*/reduce-* を絶対値で実行して同期する。
@@ -17,7 +19,8 @@
 // 環境変数：
 //   CAPACITY_CSV_URL … 定員マスターの「ウェブに公開(CSV)」URL（必須）
 //   RES_FILES … カンマ区切りの予約JSONパス（既定 jalan/urakata/aj-reservations.json）
-//   REQUEST_AT_OR_BELOW … リクエスト化しきい値（既定 1）
+//   REQUEST_AT_OR_BELOW … 満席化しきい値（既定 0）
+//   SYNC_HORIZON_DAYS … この日数以内は全枠を同期（既定 45）
 //   ONLY_FUTURE … 今日以降のみ（既定 true）
 //   DRY_RUN（既定 true）/ HEADLESS（enforce時に子プロセスへ継承）
 //   ※enforce（DRY_RUN=false）には各サイトのログイン情報が env に必要
@@ -233,18 +236,26 @@ async function main() {
 }
 
 // 目標状態を各サイトの mode-*/reduce-* を子プロセスで実行して反映する。
-// ※「対応が必要な枠」だけに限定する（予約ゼロの遠い未来の空枠まで触らない）：
-//    - リクエスト対象（△/x/R≤1/超過）… 自動確定を止める必要がある
-//    - 予約が入っている即予約枠（B>0）… 在庫を残Rに合わせる必要がある
+//
+// 対象の選び方：
+//   直近 SYNC_HORIZON_DAYS 日以内は「全枠」を対象にする。閉じた枠を開け直すには
+//   OTA側の現状を触りにいく必要があり、予約0の即予約枠を除外すると
+//   シートから ✗/△ を外しても復帰できないため（実際にその不具合があった）。
+//   それより先は、放置すると危険な枠だけに絞って処理量を抑える：
+//     - request / closed … 自動確定を止める必要がある
+//     - 予約が入っている枠 … 在庫を残Rに合わせる必要がある
+//   期間外の枠も、日が近づいて期間内に入れば自動的に整う。
 function enforce(plan) {
-  const actionable = plan.filter(p => p.mode === 'request' || p.mode === 'closed' || p.booked > 0);
-  log('enforce_scope', { total: plan.length, actionable: actionable.length });
+  const horizonDays = parseInt(process.env.SYNC_HORIZON_DAYS || '45', 10);
+  const limitDate = new Date(Date.now() + horizonDays * 86400000)
+    .toISOString().slice(0, 10);
+  const actionable = plan.filter(p =>
+    p.date <= limitDate || p.mode === 'request' || p.mode === 'closed' || p.booked > 0);
+  log('enforce_scope', { total: plan.length, actionable: actionable.length, horizonDays, limitDate });
   for (const site of CONFIG.sites) {
     const reqSlots = actionable.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
-    // 「満席」操作を実装済みなのは現状 AJ のみ。じゃらん/ウラカタは UI 未確認のため
-    // 従来どおり安全側（リクエスト＝自動確定させない）に倒す。
-    const closedMode = site === 'aj' ? 'closed' : 'request';
-    const clsSlots = actionable.filter(p => p.mode === 'closed').map(p => ({ date: p.date, time: p.time, mode: closedMode }));
+    // 3サイトとも「売止/満席」を実装・検証済み。
+    const clsSlots = actionable.filter(p => p.mode === 'closed').map(p => ({ date: p.date, time: p.time, mode: 'closed' }));
     const immSlots = actionable.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
 
     // モードはバッチ対応（SLOTS）。request / closed / immediate をまとめて渡す。
