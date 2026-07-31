@@ -2,7 +2,7 @@
 // アクティビティジャパン (ptn.activityjapan.com) 枠モード切替スクリプト（バッチ対応）
 // ------------------------------------------------------------
 // 枠を「即予約 ⇄ リクエスト」に切り替える。
-//   status: 1=即予約(在庫あり) / 3=リクエスト / 4=開催なし
+//   status: 1=即予約(在庫あり) / 3=リクエスト / 4=満席
 //   リクエスト化：日セルを選択 → 「リクエスト にする」ボタン（即反映）
 //   即予約化　　：日セルを選択 → 在庫数を入力 → 「設定」ボタン
 //
@@ -55,7 +55,9 @@ function normalizeYmd(d) {
   return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
 }
 function ymdCompact(d) { return d.replace(/-/g, ''); }
-function statusMeaning(s) { return { 1: '即予約', 3: 'リクエスト', 4: '開催なし' }[s] || `不明(${s})`; }
+// status=4 は「満席」。検証で「満席 にする」を押した結果が4だったため確定。
+// （以前は 4=開催なし と誤って記載していた）
+function statusMeaning(s) { return { 1: '即予約', 3: 'リクエスト', 4: '満席' }[s] || `不明(${s})`; }
 
 // 処理対象の枠リストを組み立てる（SLOTS優先、無ければ単一env）
 function buildTasks() {
@@ -174,26 +176,15 @@ async function switchOneSlot(page, task) {
 
   const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
   const beforeStatus = await readStatus(page, statusId);
-  // 満席のstatus値はサイト仕様が未確認のため、closed は「即予約(1)でも
-  // リクエスト(3)でもない状態」になったことで検証する（実値はログに残す）。
-  const targetStatus = mode === 'request' ? 3 : (mode === 'closed' ? null : 1);
+  const targetStatus = { request: 3, closed: 4, immediate: 1 }[mode];
   log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
 
-  if (targetStatus !== null && beforeStatus === targetStatus) {
+  if (beforeStatus === targetStatus) {
     log('slot_already', { date, time, note: `既に${statusMeaning(targetStatus)}` });
     return { result: 'already' };
   }
-  // closed 希望で、既に即予約でもリクエストでもない＝受付停止済みなら何もしない
-  if (mode === 'closed' && beforeStatus !== 1 && beforeStatus !== 3) {
-    log('slot_already', { date, time, note: `既に受付停止(status=${beforeStatus})` });
-    return { result: 'already' };
-  }
-  // 「開催なし(4)」は運営が意図的に閉じた枠。自動では開けない（即予約化しない）。
-  // ALLOW_REOPEN_CLOSED=true のときだけ、手動復旧のために変更を許可する。
-  if (beforeStatus === 4 && process.env.ALLOW_REOPEN_CLOSED !== 'true') {
-    log('slot_skip', { date, time, note: '開催なしのため自動変更しない（閉じたまま）' });
-    return { result: 'skipped' };
-  }
+  // 満席(4) は本システムが設定する状態なので、シートに従って開け直してよい。
+  // （以前は 4 を「開催なし」と誤解し、復帰できない原因になっていた）
   if (CONFIG.dryRun) {
     log('slot_dry_run', { date, time, note: `${statusMeaning(beforeStatus)} → ${statusMeaning(targetStatus)}（変更せず）` });
     return { result: 'dry_run' };
@@ -229,13 +220,8 @@ async function switchOneSlot(page, task) {
   await page.waitForSelector('tr.plan-stock', { timeout: 20000 });
   await ensureMonthShown(page, compact);
   const afterStatus = await readStatus(page, statusId);
-  if (mode === 'closed') {
-    log('closed_status_observed', { date, time, afterStatus, meaning: statusMeaning(afterStatus) });
-    if (afterStatus === 1 || afterStatus === 3) {
-      throw new SlotSyncError(`満席化検証NG：リロード後も受付可能(${statusMeaning(afterStatus)})`);
-    }
-  } else if (afterStatus !== targetStatus) {
-    throw new SlotSyncError(`切替検証NG：想定(${targetStatus})だがリロード後は(${afterStatus})`);
+  if (afterStatus !== targetStatus) {
+    throw new SlotSyncError(`切替検証NG：想定(${statusMeaning(targetStatus)})だがリロード後は(${statusMeaning(afterStatus)})`);
   }
   log('slot_switched', { date, time, from: statusMeaning(beforeStatus), to: statusMeaning(afterStatus) });
   return { result: 'switched', from: beforeStatus, to: afterStatus };
