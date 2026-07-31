@@ -188,8 +188,9 @@ async function switchOneSlot(page, task) {
     log('slot_already', { date, time, note: `既に受付停止(status=${beforeStatus})` });
     return { result: 'already' };
   }
-  // 「開催なし(4)」は運営が意図的に閉じた枠。自動で開けない（即予約化しない）。
-  if (beforeStatus === 4) {
+  // 「開催なし(4)」は運営が意図的に閉じた枠。自動では開けない（即予約化しない）。
+  // ALLOW_REOPEN_CLOSED=true のときだけ、手動復旧のために変更を許可する。
+  if (beforeStatus === 4 && process.env.ALLOW_REOPEN_CLOSED !== 'true') {
     log('slot_skip', { date, time, note: '開催なしのため自動変更しない（閉じたまま）' });
     return { result: 'skipped' };
   }
@@ -203,10 +204,17 @@ async function switchOneSlot(page, task) {
   await rowCellBtn.click();
   await page.waitForTimeout(500);
 
+  // 実際に出ているボタンを記録する（アクセシブル名でのクリックが
+  // 意図と違う要素に当たる事例があったため、押す前の状態を残す）。
+  const panelButtons = await page.locator('button:visible')
+    .evaluateAll(els => els.map(e => (e.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 30))
+    .catch(() => []);
+  log('panel_buttons', { buttons: panelButtons });
+
   if (mode === 'request') {
-    await page.getByRole('button', { name: 'リクエスト にする' }).click();
+    await clickButtonByText(page, 'リクエスト にする');
   } else if (mode === 'closed') {
-    await page.getByRole('button', { name: '満席 にする' }).click();
+    await clickButtonByText(page, '満席 にする');
   } else {
     const spin = page.getByRole('spinbutton').first();
     await spin.waitFor({ state: 'visible', timeout: 8000 });
@@ -284,6 +292,21 @@ async function ensureMonthShown(page, compact) {
     }
   }
   throw new SlotSyncError(`対象月に移動できません（${compact}）`);
+}
+
+// ボタンを「表示テキストの完全一致」で押す。getByRole の accessible name は
+// AJ の画面で意図しない要素に当たることがあったため、テキストで厳密に選ぶ。
+async function clickButtonByText(page, label) {
+  const want = label.replace(/\s+/g, '');
+  const clicked = await page.evaluate((w) => {
+    const els = [...document.querySelectorAll('button, a, [role="button"]')];
+    const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === w
+                             && !!(e.offsetParent));   // 表示中のものだけ
+    if (el) { el.click(); return true; }
+    return false;
+  }, want);
+  if (!clicked) throw new SlotSyncError(`ボタン「${label}」が見つかりません`);
+  log('button_clicked', { label });
 }
 
 async function readStatus(page, statusId) {

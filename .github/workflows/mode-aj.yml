@@ -15,6 +15,7 @@ on:
       dry_run:   { description: "true=保存しない",     required: false, default: "true" }
       slots:     { description: "一括JSON配列（指定時は上記より優先）", required: false, default: "" }
       notify:    { description: "false=失敗してもLINE通知しない（検証用）", required: false, default: "true" }
+      allow_reopen_closed: { description: "true=「開催なし」の枠も変更する（手動復旧用）", required: false, default: "false" }
 
 concurrency:
   group: ota-sync-aj       # 在庫減算(reduce-aj)と同時にAJへログインしない
@@ -49,6 +50,7 @@ jobs:
           MODE:       ${{ github.event.client_payload.mode || github.event.inputs.mode }}
           STOCK:      ${{ github.event.client_payload.stock || github.event.inputs.stock || '0' }}
           DRY_RUN:    ${{ github.event.client_payload.dry_run || github.event.inputs.dry_run || 'true' }}
+          ALLOW_REOPEN_CLOSED: ${{ github.event.inputs.allow_reopen_closed || 'false' }}
           HEADLESS:   "true"
         run: node mode-aj-slot.js
 
