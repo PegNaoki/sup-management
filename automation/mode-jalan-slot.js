@@ -283,9 +283,17 @@ async function switchOneSlot(mng, task) {
   if (errText.length) log('panel_error', { date, time, mode, errors: errText });
 
   // 3. カレンダーをリロードして、セルのアイコンで検証
-  await backToCalendar(mng);
-  cell = await getCell(mng, date, time);
-  const afterMode = await readCellMode(cell);
+  // 保存直後は再描画が間に合わずアイコンを読めない（null）ことがある。
+  // null は「切替失敗」ではなく「読めていない」なので、読み直してから判定する。
+  let afterMode = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await backToCalendar(mng);
+    cell = await getCell(mng, date, time);
+    afterMode = await readCellMode(cell);
+    if (afterMode !== null) break;
+    log('verify_retry', { date, time, attempt, note: 'セルの状態を読めず再取得' });
+    await mng.waitForTimeout(1500);
+  }
   if (afterMode !== mode) {
     throw new SlotSyncError(`切替検証NG：想定(${mode})だが実際は(${afterMode})`);
   }

@@ -161,21 +161,36 @@ async function switchOneSlot(page, task) {
   const { date, time, mode, stock, compact } = task;
   await ensureMonthShown(page, compact);
 
-  const ids = await page.evaluate((t) => {
-    const rows = [...document.querySelectorAll('tr.plan-stock')];
-    for (const row of rows) {
+  // 同じ時間の行が複数プラン分ある（旧プランは売止で在庫を持たない）。
+  // 先頭行を決め打ちすると、対象月の在庫を持たない旧プランを掴んで
+  // status が読めず「不明(null)」になる。対象日の status が実在する行を選ぶ。
+  const cands = await page.evaluate((t) => {
+    const out = [];
+    for (const row of document.querySelectorAll('tr.plan-stock')) {
       const el = row.querySelector('.plan-time span');
       if (el && (el.textContent || '').trim() === t) {
-        return { plan: (row.querySelector('.plan_id') || {}).textContent?.trim() || '',
-                 course: (row.querySelector('.plan_course_id') || {}).textContent?.trim() || '' };
+        out.push({ plan: (row.querySelector('.plan_id') || {}).textContent?.trim() || '',
+                   course: (row.querySelector('.plan_course_id') || {}).textContent?.trim() || '' });
       }
     }
-    return null;
+    return out;
   }, time);
-  if (!ids) throw new SlotSyncError(`時間 ${time} の行が見つかりません`);
+  if (!cands.length) throw new SlotSyncError(`時間 ${time} の行が見つかりません`);
 
-  const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
-  const beforeStatus = await readStatus(page, statusId);
+  let ids = null, statusId = '', beforeStatus = null;
+  for (const c of cands) {
+    const sid = `${c.plan}_${c.course}_${compact}_status`;
+    const v = await readStatus(page, sid);
+    if (v !== null) { ids = c; statusId = sid; beforeStatus = v; break; }
+  }
+  if (!ids) {
+    // 全候補で status が読めない＝その日にこのプランの枠が無い（未開設など）。
+    // 書き込みに進んでも失敗するだけなので、明示的にスキップして次の枠へ。
+    log('slot_skip', { date, time, mode,
+      message: `対象日の枠が見つかりません（候補${cands.length}件すべて status 無し。AJ側で枠が未開設の可能性）`,
+      candidates: cands.map(c => `${c.plan}_${c.course}`) });
+    return { result: 'skipped', message: '対象日の枠が未開設（status無し）' };
+  }
   const targetStatus = { request: 3, closed: 4, immediate: 1 }[mode];
   log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
 
