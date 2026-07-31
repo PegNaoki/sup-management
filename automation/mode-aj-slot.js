@@ -298,15 +298,32 @@ async function ensureMonthShown(page, compact) {
 // AJ の画面で意図しない要素に当たることがあったため、テキストで厳密に選ぶ。
 async function clickButtonByText(page, label) {
   const want = label.replace(/\s+/g, '');
-  const clicked = await page.evaluate((w) => {
-    const els = [...document.querySelectorAll('button, a, [role="button"]')];
-    const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === w
-                             && !!(e.offsetParent));   // 表示中のものだけ
-    if (el) { el.click(); return true; }
-    return false;
+  const res = await page.evaluate((w) => {
+    // AJ の「〜にする」は button ではないため要素種別を問わず探す。
+    // 同じ文字列は祖先にも一致するので、最も内側（子孫に一致が無い）を押す。
+    const all = [...document.querySelectorAll('*')].filter(e => {
+      if (!(e.offsetParent)) return false;                       // 表示中のみ
+      return (e.textContent || '').replace(/\s+/g, '') === w;
+    });
+    const innermost = all.filter(e => !all.some(o => o !== e && e.contains(o)));
+    const el = innermost[0] || all[0];
+    if (!el) {
+      const cand = [...document.querySelectorAll('*')]
+        .filter(e => e.offsetParent && /にする/.test(e.textContent || '')
+                     && e.children.length === 0)
+        .map(e => ({ tag: e.tagName, cls: e.className,
+                     text: (e.textContent || '').replace(/\s+/g, ' ').trim() }))
+        .slice(0, 20);
+      return { ok: false, candidates: cand };
+    }
+    el.click();
+    return { ok: true, tag: el.tagName, cls: String(el.className || '') };
   }, want);
-  if (!clicked) throw new SlotSyncError(`ボタン「${label}」が見つかりません`);
-  log('button_clicked', { label });
+  if (!res.ok) {
+    log('button_not_found', { label, candidates: res.candidates });
+    throw new SlotSyncError(`ボタン「${label}」が見つかりません`);
+  }
+  log('button_clicked', { label, tag: res.tag, cls: res.cls });
 }
 
 async function readStatus(page, statusId) {
