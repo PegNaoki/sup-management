@@ -328,6 +328,14 @@ async function readCellMode(cell) {
   // 売止のセルは予約方式アイコンが消え「売止」表記だけになる。
   // アイコンが取れない＝判定不能ではなく、まず売止かどうかを本文で確かめる。
   if (!cls) {
+    // null を返す前にセルの実DOMを残す。null の原因（描画待ちなのか、
+    // 想定外のマークアップなのか）がログだけでは切り分けられなかったため。
+    const dump = await cell.evaluate(el => ({
+      html: (el.outerHTML || '').slice(0, 1500),
+      text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      icons: [...el.querySelectorAll('[class*="icon"]')].map(n => n.className).slice(0, 10),
+    })).catch(() => null);
+    log('cell_unreadable', dump || { note: 'セルのDOMも取得できず' });
     const txt = await cell.innerText().catch(() => '');
     if (txt.includes('売止')) return 'closed';
     return null;
