@@ -203,25 +203,35 @@ async function switchOneSlot(page, task) {
   log('slot_before', { date, time, mode, before, target, openBefore });
   if (before === null) throw new SlotSyncError('即時販売在庫(calendarRealtimeLimit)を読み取れませんでした');
 
-  // 売止(✕)から復帰する場合は、先に◯へ戻してから在庫を設定する（保存は最後に1回）。
+  // 販売状態(◯/✕)と在庫の両方を見て「変更が要るか」を判断する。
+  // 在庫が目標どおりでも売止のままなら復帰が必要なので、ここで打ち切ってはいけない。
   const needReopen = openBefore === false;
-  if (needReopen && !CONFIG.dryRun) {
+  const needLimit  = before !== target;
+  if (!needReopen && !needLimit) {
+    log('slot_already', { date, time, note: `既に販売(◯) かつ (${target}) ＝ ${mode}` });
+    return { result: 'already' };
+  }
+  if (CONFIG.dryRun) {
+    const parts = [];
+    if (needReopen) parts.push('売止(✕) → 販売(◯)');
+    if (needLimit)  parts.push(`( ${before} ) → ( ${target} )`);
+    log('slot_dry_run', { date, time, note: `${parts.join(' かつ ')}（変更せず）` });
+    return { result: 'dry_run' };
+  }
+
+  // 売止(✕)から復帰する場合は、先に◯へ戻してから在庫を設定する（保存は最後に1回）。
+  if (needReopen) {
     await cell.locator(OPEN_SELECTOR).first().click();
     await page.waitForTimeout(600);
     log('reopened', { date, time, note: '売止(✕) → 販売(◯)' });
   }
-  if (needReopen && CONFIG.dryRun) {
-    log('slot_dry_run', { date, time, note: `売止(✕) → 販売(◯) かつ ( ${before} ) → ( ${target} )（変更せず）` });
-    return { result: 'dry_run' };
-  }
-
-  if (before === target) {
-    log('slot_already', { date, time, note: `既に(${target}) ＝ ${mode}` });
-    return { result: 'already' };
-  }
-  if (CONFIG.dryRun) {
-    log('slot_dry_run', { date, time, note: `( ${before} ) → ( ${target} )（変更せず）` });
-    return { result: 'dry_run' };
+  if (!needLimit) {
+    // 在庫は目標どおり。復帰の反映だけ保存して検証する。
+    await saveAndWait(page);
+    const openAfter = await reloadAndReadOpen(page, date, time);
+    if (openAfter !== true) throw new SlotSyncError(`復帰検証NG：想定(◯)だがリロード後は(${openAfter})`);
+    log('slot_switched', { date, time, from: '✕', to: '◯', mode });
+    return { result: 'switched' };
   }
 
   // 編集：( n ) をクリック→入力→フォーカス外し→保存
@@ -251,7 +261,12 @@ async function switchOneSlot(page, task) {
   if (!found.ok) throw new SlotSyncError('保存後の再特定に失敗（要手動確認）');
   const after = await readLimit(page.locator('[data-urkt-target="1"]'));
   if (after !== target) throw new SlotSyncError(`保存検証NG：想定(${target})だがリロード後は(${after})`);
-  log('slot_switched', { date, time, from: before, to: after, mode });
+  // 売止から復帰した場合は、販売状態(◯)まで保存されたか確かめる。
+  if (needReopen) {
+    const openAfter = await readOpen(page.locator('[data-urkt-target="1"]'));
+    if (openAfter !== true) throw new SlotSyncError(`復帰検証NG：想定(◯)だがリロード後は(${openAfter})`);
+  }
+  log('slot_switched', { date, time, from: before, to: after, mode, reopened: needReopen });
   return { result: 'switched', from: before, to: after };
 }
 
