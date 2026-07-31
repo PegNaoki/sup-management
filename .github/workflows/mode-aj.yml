@@ -14,6 +14,7 @@ on:
       stock:     { description: "即予約化のとき設定する在庫数",  required: false, default: "0" }
       dry_run:   { description: "true=保存しない",     required: false, default: "true" }
       slots:     { description: "一括JSON配列（指定時は上記より優先）", required: false, default: "" }
+      notify:    { description: "false=失敗してもLINE通知しない（検証用）", required: false, default: "true" }
 
 concurrency:
   group: ota-sync-aj       # 在庫減算(reduce-aj)と同時にAJへログインしない
@@ -63,7 +64,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Notify failure to LINE
-        if: failure()
+        if: failure() && github.event.inputs.notify != 'false'
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
           LINE_USER:  ${{ secrets.LINE_USER_ID }}
