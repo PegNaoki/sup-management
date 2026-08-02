@@ -194,7 +194,17 @@ async function switchOneSlot(page, task) {
   const targetStatus = { request: 3, closed: 4, immediate: 1 }[mode];
   log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
 
-  if (beforeStatus === targetStatus) {
+  // 予約方式が一致していても、在庫が目標とズレていれば直す必要がある。
+  // 以前はここで打ち切っていたため、定員を上げても既に即予約だった枠は
+  // 古い在庫のまま取り残されていた（チャネル間で残数がズレる原因）。
+  let stockOk = true;
+  if (mode === 'immediate') {
+    const cur = await readStatusVal(page, statusId.replace(/_status$/, '_val'));
+    const want = Math.max(0, Number(stock) || 0);
+    stockOk = (cur === null) ? true : (cur === want);
+    if (!stockOk) log('stock_mismatch', { date, time, current: cur, target: want });
+  }
+  if (beforeStatus === targetStatus && stockOk) {
     log('slot_already', { date, time, note: `既に${statusMeaning(targetStatus)}` });
     return { result: 'already' };
   }
@@ -333,6 +343,14 @@ async function clickButtonByText(page, label) {
     throw new SlotSyncError(`ボタン「${label}」が見つかりません`);
   }
   log('button_clicked', { label, tag: res.tag, cls: res.cls });
+}
+
+// 在庫（残り即予約可能数）の hidden input を読む。読めなければ null。
+async function readStatusVal(page, valId) {
+  const v = await page.locator(`input[id="${valId}"]`).inputValue().catch(() => null);
+  if (v === null || v === '') return null;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 async function readStatus(page, statusId) {

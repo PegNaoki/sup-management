@@ -214,7 +214,17 @@ async function switchOneSlot(mng, task) {
     return { result: 'dumped' };
   }
 
-  if (beforeMode === mode) {
+  // 予約方式が一致していても、在庫（残数）が目標とズレていれば直す必要がある。
+  // 以前はここで打ち切っていたため、定員を14に上げても既に即予約だった枠は
+  // 6のまま取り残されていた（ウラカタだけ14でチャネル間がズレる原因）。
+  let stockOk = true;
+  if (mode === 'immediate' || mode === 'combination') {
+    const cur = await readStock(cell);
+    const want = Math.max(1, Number(stock) || 0);
+    stockOk = (cur === null) ? true : (cur === want);
+    if (!stockOk) log('stock_mismatch', { date, time, current: cur, target: want });
+  }
+  if (beforeMode === mode && stockOk) {
     log('slot_already', { date, time, note: `既に${modeMeaning(mode)}` });
     return { result: 'already' };
   }
@@ -349,6 +359,14 @@ async function readCellMode(cell) {
   if (s.includes('confirmed'))    return 'immediate';
   if (s.includes('nosale') || s.includes('none')) return 'closed';
   return null;
+}
+
+// セルの残数 .stock-cnt を読む（audit-mode-jalan.js と同じ）
+async function readStock(cell) {
+  const txt = await cell.locator('.stock-cnt').first().innerText().catch(() => null);
+  if (txt === null) return null;
+  const n = parseInt(txt.replace(/[^\d]/g, ''), 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 // 編集パネルからカレンダーに戻る（リロードで確実に一覧へ）
