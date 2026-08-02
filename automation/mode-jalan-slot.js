@@ -358,6 +358,15 @@ async function readCellMode(cell) {
   if (s.includes('unconfirmed'))  return 'request';   // ※ 'confirmed' 判定より前に
   if (s.includes('confirmed'))    return 'immediate';
   if (s.includes('nosale') || s.includes('none')) return 'closed';
+  // アイコンは取れているのに既知のクラスに当てはまらない。ここが実際に
+  // null を返している経路なので、判定材料をそのまま残す（8/3・8/10 の 10:00
+  // が「現在モードを読めずスキップ」になっていた原因の切り分け用）。
+  const dump = await cell.evaluate(el => ({
+    text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    icons: [...el.querySelectorAll('[class*="icon"]')].map(n => n.className).slice(0, 10),
+    html: (el.outerHTML || '').slice(0, 1200),
+  })).catch(() => null);
+  log('cell_class_unknown', { cls, ...(dump || {}) });
   return null;
 }
 
