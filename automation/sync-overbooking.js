@@ -44,8 +44,11 @@ const CONFIG = {
 // 「空欄＝既定」と誤読して閉じたはずの枠を売ってしまうため、まとめて定義する。
 //   x X Ｘ ×(00D7) ☓(2613) ✕(2715) ✖(2716) ✗(2717) ✘(2718) ❌(274C) ❎(274E) 🗙(1F5D9)
 const STOP_RE    = /^[xXＸ×☓✕✖✗✘❌❎🗙]$/u;
-//   △(25B3) ▲(25B2) ▵(25B5) ▴(25B4) ㊂ 相当の全角三角も拾う
-const REQUEST_RE = /^[△▲▵▴]$/u;
+// リクエスト強制の記号。IMEで「さんかく」を変換すると △▲▽▼∆⊿ が候補に出るため
+// まとめて拾う。取りこぼすと「未知」＝安全側の受付停止に倒れ、リクエストに
+// したい枠が閉じてしまう。
+//   △(25B3) ▲(25B2) ▵(25B5) ▴(25B4) ▽(25BD) ▼(25BC) ▿(25BF) ▾(25BE) ∆(2206) ⊿(22BF)
+const REQUEST_RE = /^[△▲▵▴▽▼▿▾∆⊿]$/u;
 
 const MODE_SCRIPT   = { urakata: 'mode-urakata-slot.js',   jalan: 'mode-jalan-slot.js',   aj: 'mode-aj-slot.js' };
 const REDUCE_SCRIPT = { urakata: 'reduce-urakata-slot.js', jalan: 'reduce-jalan-slot.js', aj: 'reduce-aj-slot.js' };
