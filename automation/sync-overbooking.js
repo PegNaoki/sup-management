@@ -40,6 +40,13 @@ const CONFIG = {
   dryRun: process.env.DRY_RUN !== 'false',
   sites: ['urakata', 'jalan', 'aj'],
 };
+// 定員マスターのセル記号。似た見た目の別コードポイントが多く、取りこぼすと
+// 「空欄＝既定」と誤読して閉じたはずの枠を売ってしまうため、まとめて定義する。
+//   x X Ｘ ×(00D7) ☓(2613) ✕(2715) ✖(2716) ✗(2717) ✘(2718) ❌(274C) ❎(274E) 🗙(1F5D9)
+const STOP_RE    = /^[xXＸ×☓✕✖✗✘❌❎🗙]$/u;
+//   △(25B3) ▲(25B2) ▵(25B5) ▴(25B4) ㊂ 相当の全角三角も拾う
+const REQUEST_RE = /^[△▲▵▴]$/u;
+
 const MODE_SCRIPT   = { urakata: 'mode-urakata-slot.js',   jalan: 'mode-jalan-slot.js',   aj: 'mode-aj-slot.js' };
 const REDUCE_SCRIPT = { urakata: 'reduce-urakata-slot.js', jalan: 'reduce-jalan-slot.js', aj: 'reduce-aj-slot.js' };
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -143,21 +150,35 @@ async function loadCapacity() {
     log('capacity_warn', { note: '日付列を認識できません（CSVでない可能性）', head: text.slice(0, 160) });
   }
   const out = [];
+  const unknown = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     const time = normTime(row[0]);                    // A列＝時間
     if (!time) continue;
     const def = Number(String(row[1]).replace(/[^\d.-]/g, '')) || 0; // B列＝既定
     for (const dc of dateCols) {
-      const cell = String(row[dc.col] == null ? '' : row[dc.col]).trim();
+      // 異体字セレクタ等の不可視文字は落としてから判定する（✗️ のような入力対策）。
+      const cell = String(row[dc.col] == null ? '' : row[dc.col])
+        .replace(/[︀-️​-‍﻿]/g, '').trim();
       let override = '', capacity = def, explicit = false;
-      if (cell === '△' || cell === '▲') { override = 'request'; explicit = true; }
-      // ✗(U+2717) はシート凡例で使う記号。漏れると「空欄＝既定」と誤読して
-      // 受付停止のはずの枠を即予約で売ってしまうため、必ず含める。
-      else if (/^[x×✕✖✗❌XＸ]$/.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
+      if (REQUEST_RE.test(cell)) { override = 'request'; explicit = true; }
+      // 受付停止の記号。漏れると「空欄＝既定」と誤読して、閉じたはずの枠を
+      // 即予約で売ってしまう（U+2717 の漏れで実際に起きた）。
+      else if (STOP_RE.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
       else if (cell !== '' && !isNaN(Number(cell))) { capacity = Number(cell); explicit = true; }
+      else if (cell !== '') {
+        // 空欄でもないのにどの記号にも当てはまらない。既定(=販売)に倒すと
+        // 売りすぎになるため、安全側の「受付停止」に倒して必ず報告する。
+        override = 'stop'; capacity = 0; explicit = true;
+        unknown.push({ date: dc.date, time, cell,
+          codepoints: [...cell].map(c => 'U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(' ') });
+      }
       out.push({ date: dc.date, time, capacity, override, explicit });
     }
+  }
+  if (unknown.length) {
+    log('capacity_cell_unrecognized', { count: unknown.length, cells: unknown.slice(0, 40) });
+    console.error(`⚠️ 定員マスターに解釈できないセルが ${unknown.length} 件あります（安全のため受付停止として扱いました）`);
   }
   return out;
 }
