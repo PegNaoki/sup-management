@@ -357,7 +357,10 @@ async function readCellMode(cell) {
   if (s.includes('combination'))  return 'combination';
   if (s.includes('unconfirmed'))  return 'request';   // ※ 'confirmed' 判定より前に
   if (s.includes('confirmed'))    return 'immediate';
-  if (s.includes('nosale') || s.includes('none')) return 'closed';
+  // icon-close は span.no-operation 内に出る「開催なし」。売止と同じく
+  // 新規予約が入らない状態なので closed 扱いにする。これが無かったため
+  // 全枠が判定不能になり、じゃらんへの反映が丸ごとスキップされていた。
+  if (s.includes('close') || s.includes('nosale') || s.includes('none')) return 'closed';
   // アイコンは取れているのに既知のクラスに当てはまらない。ここが実際に
   // null を返している経路なので、判定材料をそのまま残す（8/3・8/10 の 10:00
   // が「現在モードを読めずスキップ」になっていた原因の切り分け用）。

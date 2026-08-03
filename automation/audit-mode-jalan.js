@@ -162,7 +162,8 @@ async function readCellMode(cell) {
   if (s.includes('combination'))  return 'combination';
   if (s.includes('unconfirmed'))  return 'request';
   if (s.includes('confirmed'))    return 'immediate';
-  if (s.includes('nosale') || s.includes('none')) return 'closed';
+  // icon-close は span.no-operation 内の「開催なし」。mode 側と判定を揃える。
+  if (s.includes('close') || s.includes('nosale') || s.includes('none')) return 'closed';
   // アイコンはあるが既知クラスに一致しない。判定材料を残す。
   const dump = await cell.evaluate(el => ({
     text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160),
