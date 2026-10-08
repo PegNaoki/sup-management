@@ -88,6 +88,10 @@ jobs:
           done
           echo "jalan=${{ steps.jalan.outcome }} urakata=${{ steps.urakata.outcome }} aj=${{ steps.aj.outcome }}"
 
+      - name: Daily tally
+        working-directory: automation
+        run: node report-daily.js
+
       - name: Upload reservations
         if: always()
         uses: actions/upload-artifact@v5
