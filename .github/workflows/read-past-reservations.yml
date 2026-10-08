@@ -1,0 +1,102 @@
+name: Read Past Reservations (read-only)
+
+# 過去の体験日の予約を3サイトから読み取り、JSONとして残すだけの手動実行。
+# 集計のための読み取り専用。定期突合と違い、以下は一切行わない。
+#   ・GASへの送信（シートへの追記・キャンセル反映）
+#   ・OTAへの書き込み（枠モード・在庫）
+#   ・Googleカレンダーの更新
+# OTAの管理画面にログインして一覧を読むところまでで終わる。
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '読み取り開始日 (YYYY-MM-DD)'
+        required: true
+      to:
+        description: '読み取り終了日 (YYYY-MM-DD)'
+        required: true
+
+concurrency:
+  group: ota-sync          # 定期突合や在庫反映と同時にログインしない
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: automation
+        run: npm ci || npm install
+
+      - name: Install Chromium
+        working-directory: automation
+        timeout-minutes: 10
+        run: npx playwright install --with-deps chromium
+
+      - name: Read jalan
+        id: jalan
+        continue-on-error: true
+        working-directory: automation
+        env:
+          JALAN_ID:       ${{ secrets.JALAN_ID }}
+          JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          HEADLESS:       "true"
+          RECON_FROM:     ${{ github.event.inputs.from }}
+          RECON_TO:       ${{ github.event.inputs.to }}
+        run: node reconcile-jalan.js
+
+      - name: Read urakata
+        id: urakata
+        continue-on-error: true
+        working-directory: automation
+        env:
+          URKT_ID:       ${{ secrets.URKT_ID }}
+          URKT_PASSWORD: ${{ secrets.URKT_PASSWORD }}
+          HEADLESS:      "true"
+          RECON_FROM:    ${{ github.event.inputs.from }}
+          RECON_TO:      ${{ github.event.inputs.to }}
+          # ログイン時の認証コードをメールから取るためだけに使う（読み取りのみ）
+          GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
+          RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
+        run: node reconcile-urakata.js
+
+      - name: Read activity japan
+        id: aj
+        continue-on-error: true
+        working-directory: automation
+        env:
+          AJ_ID:       ${{ secrets.AJ_ID }}
+          AJ_PASSWORD: ${{ secrets.AJ_PASSWORD }}
+          HEADLESS:    "true"
+          RECON_FROM:  ${{ github.event.inputs.from }}
+          RECON_TO:    ${{ github.event.inputs.to }}
+        run: node reconcile-aj.js
+
+      - name: Summary
+        working-directory: automation
+        run: |
+          for f in jalan-reservations.json urakata-reservations.json aj-reservations.json; do
+            if [ -f "$f" ]; then echo "$f: $(jq '.reservations | length' "$f" 2>/dev/null || echo '?') 件"
+            else echo "$f: なし（読み取り失敗）"; fi
+          done
+          echo "jalan=${{ steps.jalan.outcome }} urakata=${{ steps.urakata.outcome }} aj=${{ steps.aj.outcome }}"
+
+      - name: Upload reservations
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: past-reservations-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            automation/jalan-reservations.json
+            automation/urakata-reservations.json
+            automation/aj-reservations.json
+            automation/run-log-*.jsonl
+            automation/*error*.png
